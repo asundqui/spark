@@ -106,6 +106,8 @@ export const defineGsplat = unindent(`
     int index;
     vec4 quaternion;
     vec4 rgba;
+    vec4 lods;
+    vec2 extra;
   };
   const uint GSPLAT_FLAG_ACTIVE = 1u << 0u;
 
@@ -117,7 +119,9 @@ export const defineGsplat = unindent(`
 export const definePackedSplats = unindent(`
   struct PackedSplats {
     usampler2DArray texture;
+    usampler2DArray texture2;
     int numSplats;
+    bool extended;
     vec4 rgbMinMaxLnScaleMinMax;
   };
 `);
@@ -142,6 +146,18 @@ const defineReadPackedSplat = unindent(`
     if ((index >= 0) && (index < numSplats)) {
       uvec4 packed = texelFetch(texture, splatTexCoord(index), 0);
       unpackSplatEncoding(packed, gsplat.center, gsplat.scales, gsplat.quaternion, gsplat.rgba, rgbMinMaxLnScaleMinMax);
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  bool readPackedSplatExt(usampler2DArray texture, usampler2DArray texture2, int numSplats, vec2 lnScaleMinMax, int index, out Gsplat gsplat) {
+    if ((index >= 0) && (index < numSplats)) {
+      ivec3 coord = splatTexCoord(index);
+      uvec4 packed = texelFetch(texture, coord, 0);
+      uvec4 packed2 = texelFetch(texture2, coord, 0);
+      unpackSplatExt(packed, packed2, gsplat.center, gsplat.scales, gsplat.quaternion, gsplat.rgba, gsplat.lods, lnScaleMinMax);
       return true;
     } else {
       return false;
@@ -174,11 +190,15 @@ export class ReadPackedSplat
         let statements: string[];
         if (packedSplats && index) {
           statements = unindentLines(`
-            if (readPackedSplat(${packedSplats}.texture, ${packedSplats}.numSplats, ${packedSplats}.rgbMinMaxLnScaleMinMax, ${index}, ${gsplat})) {
-              bool zeroSize = all(equal(${gsplat}.scales, vec3(0.0, 0.0, 0.0)));
-              ${gsplat}.flags = zeroSize ? 0u : GSPLAT_FLAG_ACTIVE;
+            ${gsplat}.flags = 0u;
+            bool splatRead = false;
+            if (!${packedSplats}.extended) {
+              splatRead = readPackedSplat(${packedSplats}.texture, ${packedSplats}.numSplats, ${packedSplats}.rgbMinMaxLnScaleMinMax, ${index}, ${gsplat});
             } else {
-              ${gsplat}.flags = 0u;
+              splatRead = readPackedSplatExt(${packedSplats}.texture, ${packedSplats}.texture2, ${packedSplats}.numSplats, ${packedSplats}.rgbMinMaxLnScaleMinMax.zw, ${index}, ${gsplat});
+            }
+            if (splatRead && !all(equal(${gsplat}.scales, vec3(0.0)))) {
+              ${gsplat}.flags = GSPLAT_FLAG_ACTIVE;
             }
           `);
         } else {
@@ -239,9 +259,14 @@ export class ReadPackedSplatRange
           statements = unindentLines(`
             ${gsplat}.flags = 0u;
             if ((${index} >= ${base}) && (${index} < (${base} + ${count}))) {
-              if (readPackedSplat(${packedSplats}.texture, ${packedSplats}.numSplats, ${packedSplats}.rgbMinMaxLnScaleMinMax, ${index}, ${gsplat})) {
-                bool zeroSize = all(equal(${gsplat}.scales, vec3(0.0, 0.0, 0.0)));
-                ${gsplat}.flags = zeroSize ? 0u : GSPLAT_FLAG_ACTIVE;
+              bool splatRead = false;
+              if (!${packedSplats}.extended) {
+                splatRead = readPackedSplat(${packedSplats}.texture, ${packedSplats}.numSplats, ${packedSplats}.rgbMinMaxLnScaleMinMax, ${index}, ${gsplat});
+              } else {
+                splatRead = readPackedSplatExt(${packedSplats}.texture, ${packedSplats}.texture2, ${packedSplats}.numSplats, ${packedSplats}.rgbMinMaxLnScaleMinMax.zw, ${index}, ${gsplat});
+              }
+              if (splatRead && !all(equal(${gsplat}.scales, vec3(0.0)))) {
+                ${gsplat}.flags = GSPLAT_FLAG_ACTIVE;
               }
             }
           `);
@@ -277,6 +302,8 @@ export class SplitGsplat extends Dyno<
     r: "float";
     g: "float";
     b: "float";
+    lods: "vec4";
+    extra: "vec2";
   }
 > {
   constructor({ gsplat }: { gsplat?: DynoVal<typeof Gsplat> }) {
@@ -298,6 +325,8 @@ export class SplitGsplat extends Dyno<
         r: "float",
         g: "float",
         b: "float",
+        lods: "vec4",
+        extra: "vec2",
       },
       inputs: { gsplat },
       globals: () => [defineGsplat],
@@ -319,6 +348,8 @@ export class SplitGsplat extends Dyno<
           r,
           g,
           b,
+          lods,
+          extra,
         } = outputs;
         return [
           !flags ? null : `${flags} = ${gsplat ? `${gsplat}.flags` : "0u"};`,
@@ -350,6 +381,12 @@ export class SplitGsplat extends Dyno<
           !r ? null : `${r} = ${gsplat ? `${gsplat}.rgba.r` : "0.0"};`,
           !g ? null : `${g} = ${gsplat ? `${gsplat}.rgba.g` : "0.0"};`,
           !b ? null : `${b} = ${gsplat ? `${gsplat}.rgba.b` : "0.0"};`,
+          !lods
+            ? null
+            : `${lods} = ${gsplat ? `${gsplat}.lods` : "vec4(0.0, 0.0, 0.0, 0.0)"};`,
+          !extra
+            ? null
+            : `${extra} = ${gsplat ? `${gsplat}.extra` : "vec2(0.0, 0.0)"};`,
         ].filter(Boolean) as string[];
       },
     });
@@ -374,6 +411,8 @@ export class CombineGsplat
       r: "float";
       g: "float";
       b: "float";
+      lods: "vec4";
+      extra: "vec2";
     },
     { gsplat: typeof Gsplat }
   >
@@ -395,6 +434,8 @@ export class CombineGsplat
     r,
     g,
     b,
+    lods,
+    extra,
   }: {
     gsplat?: DynoVal<typeof Gsplat>;
     flags?: DynoVal<"uint">;
@@ -411,6 +452,8 @@ export class CombineGsplat
     r?: DynoVal<"float">;
     g?: DynoVal<"float">;
     b?: DynoVal<"float">;
+    lods?: DynoVal<"vec4">;
+    extra?: DynoVal<"vec2">;
   }) {
     super({
       inTypes: {
@@ -429,6 +472,8 @@ export class CombineGsplat
         r: "float",
         g: "float",
         b: "float",
+        lods: "vec4",
+        extra: "vec2",
       },
       outTypes: { gsplat: Gsplat },
       inputs: {
@@ -486,6 +531,12 @@ export class CombineGsplat
           !r ? null : `${outGsplat}.rgba.r = ${r};`,
           !g ? null : `${outGsplat}.rgba.g = ${g};`,
           !b ? null : `${outGsplat}.rgba.b = ${b};`,
+          !lods
+            ? null
+            : `${outGsplat}.lods = ${lods ?? (gsplat ? `${gsplat}.lods` : "vec4(0.0, 0.0, 0.0, 0.0)")};`,
+          !extra
+            ? null
+            : `${outGsplat}.extra = ${extra ?? (gsplat ? `${gsplat}.extra` : "vec2(0.0, 0.0)")};`,
         ].filter(Boolean) as string[];
       },
     });

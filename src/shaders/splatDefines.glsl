@@ -1,5 +1,7 @@
 const float LN_SCALE_MIN = -12.0;
 const float LN_SCALE_MAX = 9.0;
+const float EXT_LN_SCALE_MIN = -14.0;
+const float EXT_LN_SCALE_MAX = 14.0;
 
 const uint SPLAT_TEX_WIDTH_BITS = 11u;
 const uint SPLAT_TEX_HEIGHT_BITS = 11u;
@@ -40,6 +42,41 @@ vec3 srgbToLinear(vec3 rgb) {
 
 vec3 linearToSrgb(vec3 rgb) {
     return pow(rgb, vec3(1.0 / 2.2));
+}
+
+uint encodeRgbE5S3(vec3 rgb) {
+    uint signs = ((rgb.r < 0.0) ? 32u : 0u) + ((rgb.g < 0.0) ? 64u : 0u) + ((rgb.b < 0.0) ? 128u : 0u);
+    rgb = abs(rgb);
+    float maxComponent = max(rgb.r, max(rgb.g, rgb.b));
+    if (maxComponent == 0.0) {
+        return 0u;
+    }
+
+    float exponent = floor(log2(maxComponent)) + 1.0;
+    float scale = exp2(-exponent);
+    rgb *= scale;
+
+    uint uR = uint(clamp(round(rgb.r * 255.0), 0.0, 255.0));
+    uint uG = uint(clamp(round(rgb.g * 255.0), 0.0, 255.0));
+    uint uB = uint(clamp(round(rgb.b * 255.0), 0.0, 255.0));
+    uint biasedExp = uint(clamp(round(exponent + 16.0), 1.0, 31.0));
+    return uR | (uG << 8u) | (uB << 16u) | ((biasedExp | signs) << 24u);
+}
+
+vec3 decodeRgbE5S3(uint encoded) {
+    vec3 rgb = vec3(
+        float(encoded & 0xffu) / 255.0,
+        float((encoded >> 8u) & 0xffu) / 255.0,
+        float((encoded >> 16u) & 0xffu) / 255.0
+    );
+    rgb *= vec3(
+        ((encoded & 0x20000000u) != 0u) ? -1.0 : 1.0,
+        ((encoded & 0x40000000u) != 0u) ? -1.0 : 1.0,
+        ((encoded & 0x80000000u) != 0u) ? -1.0 : 1.0
+    );
+    uint biasedExp = (encoded >> 24u) & 0x1fu;
+    float scale = exp2(float(biasedExp) - 16.0);
+    return rgb * scale;
 }
 
 // uint encodeQuatXyz888(vec4 q) {
@@ -93,10 +130,47 @@ uint encodeQuatOctXy88R8(vec4 q) {
     
     // --- Angle Quantization ---
     // Quantize θ ∈ [0,π] to 8 bits (0 to 255)
-    uint angleInt = uint(clamp(round((theta / 3.14159265359) * 255.0), 0.0, 255.0));
+    uint angleInt = uint(clamp(round((theta / PI) * 255.0), 0.0, 255.0));
     
     // Pack bits: bits [0–7]: quantU, [8–15]: quantV, [16–23]: angleInt.
     return (angleInt << 16u) | (quantV << 8u) | quantU;
+}
+
+uint encodeQuatOctXy1010R12(vec4 q) {
+    // Ensure minimal representation: flip if q.w is negative.
+    if (q.w < 0.0) {
+        q = -q;
+    }
+    // Compute rotation angle: θ = 2 * acos(q.w) ∈ [0,π]
+    float theta = 2.0 * acos(q.w);
+    float halfTheta = theta * 0.5;
+    float s = sin(halfTheta);
+    // Recover the rotation axis; use a default if nearly zero rotation.
+    vec3 axis = (abs(s) < 1e-6) ? vec3(1.0, 0.0, 0.0) : q.xyz / s;
+    
+    // --- Folded Octahedral Mapping (inline) ---
+    // Compute p = (axis.x, axis.y) / (|axis.x|+|axis.y|+|axis.z|)
+    float sum = abs(axis.x) + abs(axis.y) + abs(axis.z);
+    vec2 p = vec2(axis.x, axis.y) / sum;
+    // If axis.z < 0, fold the mapping.
+    if (axis.z < 0.0) {
+        float oldPx = p.x;
+        p.x = (1.0 - abs(p.y)) * (p.x >= 0.0 ? 1.0 : -1.0);
+        p.y = (1.0 - abs(oldPx)) * (p.y >= 0.0 ? 1.0 : -1.0);
+    }
+    // Remap from [-1,1] to [0,1]
+    float u_f = p.x * 0.5 + 0.5;
+    float v_f = p.y * 0.5 + 0.5;
+    // Quantize to 10 bits (0 to 1023)
+    uint quantU = uint(clamp(round(u_f * 1023.0), 0.0, 1023.0));
+    uint quantV = uint(clamp(round(v_f * 1023.0), 0.0, 1023.0));
+    
+    // --- Angle Quantization ---
+    // Quantize θ ∈ [0,π] to 12 bits (0 to 4095)
+    uint angleInt = uint(clamp(round((theta / PI) * 4095.0), 0.0, 4095.0));
+    
+    // Pack bits: bits [0–9]: quantU, [10–19]: quantV, [20–31]: angleInt.
+    return (angleInt << 20u) | (quantV << 10u) | quantU;
 }
 
 // Decode a 24‐bit encoded uint into a quaternion (vec4) using the folded octahedral inverse.
@@ -118,7 +192,33 @@ vec4 decodeQuatOctXy88R8(uint encoded) {
     axis = normalize(axis);
     
     // Decode the angle θ ∈ [0,π].
-    float theta = (float(angleInt) / 255.0) * 3.14159265359;
+    float theta = (float(angleInt) / 255.0) * PI;
+    float halfTheta = theta * 0.5;
+    float s = sin(halfTheta);
+    float w = cos(halfTheta);
+    
+    return vec4(axis * s, w);
+}
+
+vec4 decodeQuatOctXy1010R12(uint encoded) {
+    // Extract the fields.
+    uint quantU = encoded & uint(0x3FFu);               // bits 0–9
+    uint quantV = (encoded >> 10u) & uint(0x3FFu);         // bits 10–19
+    uint angleInt = encoded >> 20u;                      // bits 20–31
+
+    // Recover u and v in [0,1], then map to [-1,1].
+    float u_f = float(quantU) / 1023.0;
+    float v_f = float(quantV) / 1023.0;
+    vec2 f = vec2(u_f * 2.0 - 1.0, v_f * 2.0 - 1.0);
+
+    vec3 axis = vec3(f.xy, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-axis.z, 0.0);
+    axis.x += (axis.x >= 0.0) ? -t : t;
+    axis.y += (axis.y >= 0.0) ? -t : t;
+    axis = normalize(axis);
+    
+    // Decode the angle θ ∈ [0,π].
+    float theta = (float(angleInt) / 4095.0) * PI;
     float halfTheta = theta * 0.5;
     float s = sin(halfTheta);
     float w = cos(halfTheta);
@@ -144,9 +244,9 @@ vec4 decodeQuatOctXy88R8(uint encoded) {
 //     float yaw = atan(siny_cosp, cosy_cosp);
     
 //     // Normalize each angle from [-PI, PI] to [0, 1]
-//     float normRoll  = (roll  + 3.14159265359) / (2.0 * 3.14159265359);
-//     float normPitch = (pitch + 3.14159265359) / (2.0 * 3.14159265359);
-//     float normYaw   = (yaw   + 3.14159265359) / (2.0 * 3.14159265359);
+//     float normRoll  = (roll  + PI) / (2.0 * PI);
+//     float normPitch = (pitch + PI) / (2.0 * PI);
+//     float normYaw   = (yaw   + PI) / (2.0 * PI);
     
 //     // Quantize each normalized angle to 8 bits (0..255)
 //     uint rollQ  = uint(round(normRoll  * 255.0));
@@ -175,9 +275,9 @@ vec4 decodeQuatOctXy88R8(uint encoded) {
 //     float normYaw   = float(yawQ)   / 255.0;
     
 //     // Map from [0,1] back to [-PI, PI].
-//     float roll  = normRoll  * (2.0 * 3.14159265359) - 3.14159265359;
-//     float pitch = normPitch * (2.0 * 3.14159265359) - 3.14159265359;
-//     float yaw   = normYaw   * (2.0 * 3.14159265359) - 3.14159265359;
+//     float roll  = normRoll  * (2.0 * PI) - PI;
+//     float pitch = normPitch * (2.0 * PI) - PI;
+//     float yaw   = normYaw   * (2.0 * PI) - PI;
     
 //     // Convert Euler angles (roll, pitch, yaw) to quaternion.
 //     float cr = cos(roll * 0.5);
@@ -268,6 +368,72 @@ void unpackSplatEncoding(uvec4 packed, out vec3 center, out vec3 scales, out vec
 // Unpack a Gsplat from a uvec4
 void unpackSplat(uvec4 packed, out vec3 center, out vec3 scales, out vec4 quaternion, out vec4 rgba) {
     unpackSplatEncoding(packed, center, scales, quaternion, rgba, vec4(0.0, 1.0, LN_SCALE_MIN, LN_SCALE_MAX));
+}
+
+void packSplatExt(
+    out uvec4 packed, out uvec4 packed2,
+    vec3 center, vec3 scales, vec4 quaternion, vec4 rgba, vec4 lods, vec2 lnScaleMinMax
+) {
+    packed.x = floatBitsToUint(center.x);
+    packed.y = floatBitsToUint(center.y);
+    packed.z = floatBitsToUint(center.z);
+    packed.w = packHalf2x16(vec2(rgba.a, 0.0));
+
+    packed2.x = encodeRgbE5S3(rgba.rgb);
+    packed2.y = encodeQuatOctXy1010R12(quaternion);
+
+    float lnScaleMin = lnScaleMinMax.x;
+    float lnScaleMax = lnScaleMinMax.y;
+    float lnScaleScale = 510.0 / (lnScaleMax - lnScaleMin);
+    uvec3 uScales = uvec3(
+        (scales.x == 0.0) ? 0u : uint(round(clamp((log(scales.x) - lnScaleMin) * lnScaleScale, 0.0, 510.0))) + 1u,
+        (scales.y == 0.0) ? 0u : uint(round(clamp((log(scales.y) - lnScaleMin) * lnScaleScale, 0.0, 510.0))) + 1u,
+        (scales.z == 0.0) ? 0u : uint(round(clamp((log(scales.z) - lnScaleMin) * lnScaleScale, 0.0, 510.0))) + 1u
+    );
+    uvec4 uLods = uvec4(
+        (lods.x == 0.0) ? 0u : uint(round(clamp((log(lods.x) - lnScaleMin) * lnScaleScale, 0.0, 510.0))) + 1u,
+        (lods.y == 0.0) ? 0u : uint(round(clamp((log(lods.y) - lnScaleMin) * lnScaleScale, 0.0, 510.0))) + 1u,
+        (lods.z == 0.0) ? 0u : uint(round(clamp((log(lods.z) - lnScaleMin) * lnScaleScale, 0.0, 510.0))) + 1u,
+        (lods.w == 0.0) ? 0u : uint(round(clamp((log(lods.w) - lnScaleMin) * lnScaleScale, 0.0, 510.0))) + 1u
+    );
+    packed2.z = uScales.x | (uScales.y << 9u) | (uScales.z << 18u) | (uLods.x << 27u);
+    packed2.w = (uLods.x >> 5u) | (uLods.y << 4u) | (uLods.z << 13u) | (uLods.w << 22u);
+}
+
+void unpackSplatExt(
+    uvec4 packed, uvec4 packed2,
+    out vec3 center, out vec3 scales, out vec4 quaternion, out vec4 rgba, out vec4 lods, vec2 lnScaleMinMax
+) {
+    center.x = uintBitsToFloat(packed.x);
+    center.y = uintBitsToFloat(packed.y);
+    center.z = uintBitsToFloat(packed.z);
+    rgba.a = unpackHalf2x16(packed.w).x;
+
+    rgba.rgb = decodeRgbE5S3(packed2.x);
+    quaternion = decodeQuatOctXy1010R12(packed2.y);
+    
+    uvec3 uScales = uvec3(packed2.z & 0x1ffu, (packed2.z >> 9u) & 0x1ffu, (packed2.z >> 18u) & 0x1ffu);
+    float lnScaleMin = lnScaleMinMax.x;
+    float lnScaleMax = lnScaleMinMax.y;
+    float lnScaleScale = (lnScaleMax - lnScaleMin) / 510.0;
+    scales = vec3(
+        (uScales.x == 0u) ? 0.0 : exp(lnScaleMin + float(uScales.x - 1u) * lnScaleScale),
+        (uScales.y == 0u) ? 0.0 : exp(lnScaleMin + float(uScales.y - 1u) * lnScaleScale),
+        (uScales.z == 0u) ? 0.0 : exp(lnScaleMin + float(uScales.z - 1u) * lnScaleScale)
+    );
+
+    uvec4 uLods = uvec4(
+        ((packed2.z >> 27u) | (packed2.w << 5u)) & 0x1ffu,
+        (packed2.w >> 4u) & 0x1ffu,
+        (packed2.w >> 13u) & 0x1ffu,
+        (packed2.w >> 22u) & 0x1ffu
+    );
+    lods = vec4(
+        (uLods.x == 0u) ? 0.0 : exp(lnScaleMin + float(uLods.x - 1u) * lnScaleScale),
+        (uLods.y == 0u) ? 0.0 : exp(lnScaleMin + float(uLods.y - 1u) * lnScaleScale),
+        (uLods.z == 0u) ? 0.0 : exp(lnScaleMin + float(uLods.z - 1u) * lnScaleScale),
+        (uLods.w == 0u) ? 0.0 : exp(lnScaleMin + float(uLods.w - 1u) * lnScaleScale)
+    );
 }
 
 // Rotate vector v by quaternion q

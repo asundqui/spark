@@ -16,7 +16,7 @@ import {
   unindent,
   unindentLines,
 } from "./dyno";
-import { getTextureSize } from "./utils";
+import { computeMaxSplats, getTextureSize } from "./utils";
 
 // An RgbaArray is a collection of ordered RGBA8 values, which can be used as a dyno
 // data source, for example for recoloring Gsplats via SplatMesh.splatRgba.
@@ -93,7 +93,7 @@ export class RgbaArray {
   // Ensure that our array is large enough to hold capacity RGBA8 values.
   ensureCapacity(capacity: number): Uint8Array {
     if (!this.array || capacity > (this.array?.length ?? 0) / 4) {
-      this.capacity = getTextureSize(capacity).maxSplats;
+      this.capacity = computeMaxSplats(capacity);
       const newArray = new Uint8Array(this.capacity * 4);
       if (this.array) {
         // Copy over existing data

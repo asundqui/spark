@@ -12,7 +12,7 @@ pub fn decode_scale(scale: u8, ln_scale_min: f32, ln_scale_max: f32) -> f32 {
 }
 
 pub fn raycast_spheres(
-    buffer: &[u32], distances: &mut Vec<f32>, 
+    buffer: &[u32], buffer2: Option<&[u32]>, distances: &mut Vec<f32>, 
     origin: [f32; 3], dir: [f32; 3], near: f32, far: f32,
     ln_scale_min: f32, ln_scale_max: f32,
 ) {
@@ -45,7 +45,7 @@ pub fn raycast_spheres(
 }
 
 pub fn raycast_ellipsoids(
-    buffer: &[u32], distances: &mut Vec<f32>, 
+    buffer: &[u32], buffer2: Option<&[u32]>, distances: &mut Vec<f32>, 
     origin: [f32; 3], dir: [f32; 3], near: f32, far: f32,
     ln_scale_min: f32, ln_scale_max: f32,
 ) {

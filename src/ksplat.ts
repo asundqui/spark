@@ -124,9 +124,6 @@ export function decodeKsplat(
 
   const numSplats = splatCount;
   initNumSplats(numSplats);
-  const maxSplats = computeMaxSplats(numSplats);
-  const packedArray = new Uint32Array(maxSplats * 4);
-  const extra: Record<string, unknown> = {};
 
   let sectionBase = HEADER_BYTES + maxSectionCount * SECTION_BYTES;
 
@@ -357,7 +354,7 @@ export function unpackKsplat(
   fileBytes: Uint8Array,
   splatEncoding: SplatEncoding,
 ): {
-  packedArray: Uint32Array;
+  packedArray: Uint32Array | Uint32Array[];
   numSplats: number;
   extra: Record<string, unknown>;
 } {
@@ -391,7 +388,11 @@ export function unpackKsplat(
 
   const numSplats = splatCount;
   const maxSplats = computeMaxSplats(numSplats);
-  const packedArray = new Uint32Array(maxSplats * 4);
+  const packedArray = splatEncoding.extended
+    ? Array(2)
+        .fill(null)
+        .map(() => new Uint32Array(maxSplats * 4))
+    : new Uint32Array(maxSplats * 4);
   const extra: Record<string, unknown> = {};
 
   let sectionBase = HEADER_BYTES + maxSectionCount * SECTION_BYTES;

@@ -4,6 +4,8 @@ import * as THREE from "three";
 // Miscellaneous utility functions for Spark
 
 import {
+  EXT_LN_SCALE_MAX,
+  EXT_LN_SCALE_MIN,
   LN_SCALE_MAX,
   LN_SCALE_MIN,
   SCALE_ZERO,
@@ -12,6 +14,9 @@ import {
   SPLAT_TEX_WIDTH,
 } from "./defines.js";
 import { unindent } from "./dyno/base.js";
+
+export const threeRevision = Number.parseInt(THREE.REVISION);
+export const threeMrtArray = threeRevision >= 179;
 
 const f32buffer = new Float32Array(1);
 const u32buffer = new Uint32Array(f32buffer.buffer);
@@ -126,6 +131,87 @@ export function fromHalf(h: number): number {
   // then read it as a float32 to return a JavaScript number.
   u32buffer[0] = f32bits;
   return f32buffer[0];
+}
+
+// Encode RGB values to RGBE5S3 format with signed values support
+// E5S3 layout: [B_sign][G_sign][R_sign][5-bit biased exponent]
+// Range: approximately ±1/32768 to ±32768 (2^-15 to 2^15)
+export function encodeRgbE5S3(r: number, g: number, b: number): number {
+  // Handle zero case
+  if (r === 0 && g === 0 && b === 0) {
+    return 0; // All zeros
+  }
+
+  // Extract signs and absolute values
+  const signR = r < 0 ? 1 : 0;
+  const signG = g < 0 ? 1 : 0;
+  const signB = b < 0 ? 1 : 0;
+
+  const absR = Math.abs(r);
+  const absG = Math.abs(g);
+  const absB = Math.abs(b);
+
+  // Find the maximum absolute component to determine the shared exponent
+  const maxComponent = Math.max(absR, absG, absB);
+
+  // Handle case where all values are zero
+  if (maxComponent === 0) {
+    return 0;
+  }
+
+  // Calculate the exponent needed to normalize the max component to [0.5, 1.0)
+  const exponent = Math.floor(Math.log2(maxComponent)) + 1;
+  const scale = 2 ** -exponent;
+
+  // Scale the absolute RGB values
+  const scaledR = absR * scale;
+  const scaledG = absG * scale;
+  const scaledB = absB * scale;
+
+  // Convert to 8-bit integers (0-255)
+  const uR = Math.min(255, Math.max(0, Math.round(scaledR * 255)));
+  const uG = Math.min(255, Math.max(0, Math.round(scaledG * 255)));
+  const uB = Math.min(255, Math.max(0, Math.round(scaledB * 255)));
+
+  // Bias the exponent by 16 and clamp to 5-bit range (1-31, 0 reserved for zero)
+  const biasedExp = Math.min(31, Math.max(1, exponent + 16));
+
+  // Pack E8: [B_sign][G_sign][R_sign][5-bit exponent]
+  const uE = biasedExp | (signR << 5) | (signG << 6) | (signB << 7);
+
+  // Pack into 32-bit integer: R | G<<8 | B<<16 | E<<24
+  return uR | (uG << 8) | (uB << 16) | (uE << 24);
+}
+
+// Decode RGBE5S3 format back to RGB float values (with signed support)
+export function decodeRgbE5S3(rgbe: number, color: THREE.Color) {
+  // Extract components
+  const uR = rgbe & 0xff;
+  const uG = (rgbe >>> 8) & 0xff;
+  const uB = (rgbe >>> 16) & 0xff;
+  const uE = (rgbe >>> 24) & 0xff;
+
+  // Extract 5-bit exponent and signs
+  const biasedExp = uE & 0x1f; // Lower 5 bits
+  const signR = (uE >>> 5) & 1;
+  const signG = (uE >>> 6) & 1;
+  const signB = (uE >>> 7) & 1;
+
+  // Handle zero exponent case
+  if (biasedExp === 0) {
+    color.set(0, 0, 0);
+    return;
+  }
+
+  // Remove bias from exponent (symmetric range -15 to +15)
+  const exponent = biasedExp - 16;
+  const scale = 2 ** exponent;
+
+  // Convert back to float values and apply signs
+  const r = (signR ? -1 : 1) * (uR / 255) * scale;
+  const g = (signG ? -1 : 1) * (uG / 255) * scale;
+  const b = (signB ? -1 : 1) * (uB / 255) * scale;
+  color.set(r, g, b);
 }
 
 // Convert a number 0..1 to a 0..255 uint
@@ -337,7 +423,7 @@ export class FreeList<T, Args> {
 // logarithmic uint8, rotation as three uint8s representing rotation axis and angle,
 // and RGBA as 4xuint8.
 export function setPackedSplat(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   x: number,
   y: number,
@@ -360,93 +446,78 @@ export function setPackedSplat(
     lnScaleMax?: number;
   },
 ) {
-  const rgbMin = encoding?.rgbMin ?? 0.0;
-  const rgbMax = encoding?.rgbMax ?? 1.0;
-  const rgbRange = rgbMax - rgbMin;
-  const uR = floatToUint8((r - rgbMin) / rgbRange);
-  const uG = floatToUint8((g - rgbMin) / rgbRange);
-  const uB = floatToUint8((b - rgbMin) / rgbRange);
-  const uA = floatToUint8(opacity);
-
-  // Alternate internal encodings commented out below.
-  const uQuat = encodeQuatOctXy88R8(
-    new THREE.Quaternion(quatX, quatY, quatZ, quatW),
-  );
-  // const uQuat = encodeQuatXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
-  // const uQuat = encodeQuatEulerXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
-  const uQuatX = uQuat & 0xff;
-  const uQuatY = (uQuat >>> 8) & 0xff;
-  const uQuatZ = (uQuat >>> 16) & 0xff;
-
-  // Allow scales below LN_SCALE_MIN to be encoded as 0, which signifies a 2DGS
-  const lnScaleMin = encoding?.lnScaleMin ?? LN_SCALE_MIN;
-  const lnScaleMax = encoding?.lnScaleMax ?? LN_SCALE_MAX;
-  const lnScaleScale = 254.0 / (lnScaleMax - lnScaleMin);
-  const uScaleX =
-    scaleX < SCALE_ZERO
-      ? 0
-      : Math.min(
-          255,
-          Math.max(
-            1,
-            Math.round((Math.log(scaleX) - lnScaleMin) * lnScaleScale) + 1,
-          ),
-        );
-  const uScaleY =
-    scaleY < SCALE_ZERO
-      ? 0
-      : Math.min(
-          255,
-          Math.max(
-            1,
-            Math.round((Math.log(scaleY) - lnScaleMin) * lnScaleScale) + 1,
-          ),
-        );
-  const uScaleZ =
-    scaleZ < SCALE_ZERO
-      ? 0
-      : Math.min(
-          255,
-          Math.max(
-            1,
-            Math.round((Math.log(scaleZ) - lnScaleMin) * lnScaleScale) + 1,
-          ),
-        );
-
-  const uCenterX = toHalf(x);
-  const uCenterY = toHalf(y);
-  const uCenterZ = toHalf(z);
-
-  // Encode the splat as 4 consecutive Uint32 elements
+  if (index === 0) {
+    console.log("setPackedSplat", encoding, Array.isArray(packedSplats));
+  }
   const i4 = index * 4;
-  packedSplats[i4] = uR | (uG << 8) | (uB << 16) | (uA << 24);
-  packedSplats[i4 + 1] = uCenterX | (uCenterY << 16);
-  packedSplats[i4 + 2] = uCenterZ | (uQuatX << 16) | (uQuatY << 24);
-  packedSplats[i4 + 3] =
-    uScaleX | (uScaleY << 8) | (uScaleZ << 16) | (uQuatZ << 24);
+  if (!Array.isArray(packedSplats)) {
+    const rgbMin = encoding?.rgbMin ?? 0.0;
+    const rgbMax = encoding?.rgbMax ?? 1.0;
+    const rgbRange = rgbMax - rgbMin;
+    const uR = floatToUint8((r - rgbMin) / rgbRange);
+    const uG = floatToUint8((g - rgbMin) / rgbRange);
+    const uB = floatToUint8((b - rgbMin) / rgbRange);
+    const uA = floatToUint8(opacity);
+
+    // Alternate internal encodings commented out below.
+    const uQuat = encodeQuatOctXy88R8(quatX, quatY, quatZ, quatW);
+    // const uQuat = encodeQuatOctXy88R8(quatX, quatY, quatZ, quatW);
+    // const uQuat = encodeQuatXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
+    // const uQuat = encodeQuatEulerXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
+    const uQuatX = uQuat & 0xff;
+    const uQuatY = (uQuat >>> 8) & 0xff;
+    const uQuatZ = (uQuat >>> 16) & 0xff;
+
+    const uScale = encodeScale888(scaleX, scaleY, scaleZ, encoding);
+
+    const uCenterX = toHalf(x);
+    const uCenterY = toHalf(y);
+    const uCenterZ = toHalf(z);
+
+    // Encode the splat as 4 consecutive Uint32 elements
+    packedSplats[i4] = uR | (uG << 8) | (uB << 16) | (uA << 24);
+    packedSplats[i4 + 1] = uCenterX | (uCenterY << 16);
+    packedSplats[i4 + 2] = uCenterZ | (uQuatX << 16) | (uQuatY << 24);
+    packedSplats[i4 + 3] = uScale | (uQuatZ << 24);
+  } else {
+    const [p0, p1] = packedSplats;
+    p0[i4] = floatBitsToUint(x);
+    p0[i4 + 1] = floatBitsToUint(y);
+    p0[i4 + 2] = floatBitsToUint(z);
+    p0[i4 + 3] = toHalf(opacity) | (p0[i4 + 3] & 0xffff0000);
+    p1[i4] = encodeRgbE5S3(r, g, b);
+    p1[i4 + 1] = encodeQuatOctXy1010R12(quatX, quatY, quatZ, quatW);
+    encodeScaleLod9(p1, i4 + 2, scaleX, scaleY, scaleZ, 0, 0, 0, 0, encoding);
+  }
 }
 
 // Encode the center coordinates x,y,z in the packedSplats Uint32Array,
 // leaving all other fields as is.
 export function setPackedSplatCenter(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   x: number,
   y: number,
   z: number,
 ) {
-  const uCenterX = toHalf(x);
-  const uCenterY = toHalf(y);
-  const uCenterZ = toHalf(z);
-
   const i4 = index * 4;
-  packedSplats[i4 + 1] = uCenterX | (uCenterY << 16);
-  packedSplats[i4 + 2] = uCenterZ | (packedSplats[i4 + 2] & 0xffff0000);
+  if (!Array.isArray(packedSplats)) {
+    const uCenterX = toHalf(x);
+    const uCenterY = toHalf(y);
+    const uCenterZ = toHalf(z);
+    packedSplats[i4 + 1] = uCenterX | (uCenterY << 16);
+    packedSplats[i4 + 2] = uCenterZ | (packedSplats[i4 + 2] & 0xffff0000);
+  } else {
+    const [p0, _p1] = packedSplats;
+    p0[i4] = floatBitsToUint(x);
+    p0[i4 + 1] = floatBitsToUint(y);
+    p0[i4 + 2] = floatBitsToUint(z);
+  }
 }
 
 // Encode the scales x,y,z in the packedSplats Uint32Array, leaving all other fields as is.
 export function setPackedSplatScales(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   scaleX: number,
   scaleY: number,
@@ -455,78 +526,83 @@ export function setPackedSplatScales(
     lnScaleMin?: number;
     lnScaleMax?: number;
   },
+  lodMin?: number,
+  lodLow?: number,
+  lodHigh?: number,
+  lodMax?: number,
 ) {
-  // Allow scales below LN_SCALE_MIN to be encoded as 0, which signifies a 2DGS
-  const lnScaleMin = encoding?.lnScaleMin ?? LN_SCALE_MIN;
-  const lnScaleMax = encoding?.lnScaleMax ?? LN_SCALE_MAX;
-  const lnScaleScale = 254.0 / (lnScaleMax - lnScaleMin);
-  const uScaleX =
-    scaleX < SCALE_ZERO
-      ? 0
-      : Math.min(
-          255,
-          Math.max(
-            1,
-            Math.round((Math.log(scaleX) - lnScaleMin) * lnScaleScale) + 1,
-          ),
-        );
-  const uScaleY =
-    scaleY < SCALE_ZERO
-      ? 0
-      : Math.min(
-          255,
-          Math.max(
-            1,
-            Math.round((Math.log(scaleY) - lnScaleMin) * lnScaleScale) + 1,
-          ),
-        );
-  const uScaleZ =
-    scaleZ < SCALE_ZERO
-      ? 0
-      : Math.min(
-          255,
-          Math.max(
-            1,
-            Math.round((Math.log(scaleZ) - lnScaleMin) * lnScaleScale) + 1,
-          ),
-        );
-
   const i4 = index * 4;
-  packedSplats[i4 + 3] =
-    uScaleX |
-    (uScaleY << 8) |
-    (uScaleZ << 16) |
-    (packedSplats[i4 + 3] & 0xff000000);
+  if (!Array.isArray(packedSplats)) {
+    // Allow scales below LN_SCALE_MIN to be encoded as 0, which signifies a 2DGS
+    const uScale = encodeScale888(scaleX, scaleY, scaleZ, encoding);
+    packedSplats[i4 + 3] = uScale | (packedSplats[i4 + 3] & 0xff000000);
+  } else {
+    const [_p0, p1] = packedSplats;
+    encodeScaleLod9(
+      p1,
+      i4 + 2,
+      scaleX,
+      scaleY,
+      scaleZ,
+      lodMin ?? 0,
+      lodLow ?? 0,
+      lodHigh ?? 0,
+      lodMax ?? 0,
+      encoding,
+    );
+  }
+}
+
+export function setPackedSplatExtra(
+  packedSplats: Uint32Array | Uint32Array[],
+  index: number,
+  extra0: number,
+  extra1: number,
+) {
+  const i4 = index * 4;
+  if (!Array.isArray(packedSplats)) {
+    throw new Error(
+      "setPackedSplatExtra not implemented for non-extended splats",
+    );
+  }
+
+  const [p0, _p1] = packedSplats;
+  const e0 = floatToUint8(extra0);
+  const e1 = floatToUint8(extra1);
+  p0[i4 + 3] = (p0[i4 + 3] & 0xffff) | (e0 << 16) | (e1 << 24);
 }
 
 // Encode the rotation quatX, quatY, quatZ, quatW in the packedSplats Uint32Array,
 // leaving all other fields as is.
 export function setPackedSplatQuat(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   quatX: number,
   quatY: number,
   quatZ: number,
   quatW: number,
 ) {
-  const uQuat = encodeQuatOctXy88R8(
-    new THREE.Quaternion(quatX, quatY, quatZ, quatW),
-  );
-  // const uQuat = encodeQuatXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
-  // const uQuat = encodeQuatEulerXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
-  const uQuatX = uQuat & 0xff;
-  const uQuatY = (uQuat >>> 8) & 0xff;
-  const uQuatZ = (uQuat >>> 16) & 0xff;
-
   const i4 = index * 4;
-  packedSplats[i4 + 2] =
-    (packedSplats[i4 + 2] & 0x0000ffff) | (uQuatX << 16) | (uQuatY << 24);
-  packedSplats[i4 + 3] = (packedSplats[i4 + 3] & 0x00ffffff) | (uQuatZ << 24);
+  if (!Array.isArray(packedSplats)) {
+    const uQuat = encodeQuatOctXy88R8(quatX, quatY, quatZ, quatW);
+    // const uQuat = encodeQuatOctXy88R8(quatX, quatY, quatZ, quatW);
+    // const uQuat = encodeQuatXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
+    // const uQuat = encodeQuatEulerXyz888(new THREE.Quaternion(quatX, quatY, quatZ, quatW));
+    const uQuatX = uQuat & 0xff;
+    const uQuatY = (uQuat >>> 8) & 0xff;
+    const uQuatZ = (uQuat >>> 16) & 0xff;
+    packedSplats[i4 + 2] =
+      (packedSplats[i4 + 2] & 0x0000ffff) | (uQuatX << 16) | (uQuatY << 24);
+    packedSplats[i4 + 3] = (packedSplats[i4 + 3] & 0x00ffffff) | (uQuatZ << 24);
+  } else {
+    const [_p0, p1] = packedSplats;
+    p1[i4 + 1] = encodeQuatOctXy1010R12(quatX, quatY, quatZ, quatW);
+  }
 }
 
 // Encode the RGBA color in the packedSplats Uint32Array, leaving other fields alone.
 export function setPackedSplatRgba(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   r: number,
   g: number,
@@ -537,20 +613,26 @@ export function setPackedSplatRgba(
     rgbMax?: number;
   },
 ) {
-  const rgbMin = encoding?.rgbMin ?? 0.0;
-  const rgbMax = encoding?.rgbMax ?? 1.0;
-  const rgbRange = rgbMax - rgbMin;
-  const uR = floatToUint8((r - rgbMin) / rgbRange);
-  const uG = floatToUint8((g - rgbMin) / rgbRange);
-  const uB = floatToUint8((b - rgbMin) / rgbRange);
-  const uA = floatToUint8(a);
   const i4 = index * 4;
-  packedSplats[i4] = uR | (uG << 8) | (uB << 16) | (uA << 24);
+  if (!Array.isArray(packedSplats)) {
+    const rgbMin = encoding?.rgbMin ?? 0.0;
+    const rgbMax = encoding?.rgbMax ?? 1.0;
+    const rgbRange = rgbMax - rgbMin;
+    const uR = floatToUint8((r - rgbMin) / rgbRange);
+    const uG = floatToUint8((g - rgbMin) / rgbRange);
+    const uB = floatToUint8((b - rgbMin) / rgbRange);
+    const uA = floatToUint8(a);
+    packedSplats[i4] = uR | (uG << 8) | (uB << 16) | (uA << 24);
+  } else {
+    const [p0, p1] = packedSplats;
+    p0[i4 + 3] = toHalf(a);
+    p1[i4] = encodeRgbE5S3(r, g, b);
+  }
 }
 
 // Encode the RGB color in the packedSplats Uint32Array, leaving other fields alone.
 export function setPackedSplatRgb(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   r: number,
   g: number,
@@ -560,46 +642,58 @@ export function setPackedSplatRgb(
     rgbMax?: number;
   },
 ) {
-  const rgbMin = encoding?.rgbMin ?? 0.0;
-  const rgbMax = encoding?.rgbMax ?? 1.0;
-  const rgbRange = rgbMax - rgbMin;
-  const uR = floatToUint8((r - rgbMin) / rgbRange);
-  const uG = floatToUint8((g - rgbMin) / rgbRange);
-  const uB = floatToUint8((b - rgbMin) / rgbRange);
-
   const i4 = index * 4;
-  packedSplats[i4] =
-    uR | (uG << 8) | (uB << 16) | (packedSplats[i4] & 0xff000000);
+  if (!Array.isArray(packedSplats)) {
+    const rgbMin = encoding?.rgbMin ?? 0.0;
+    const rgbMax = encoding?.rgbMax ?? 1.0;
+    const rgbRange = rgbMax - rgbMin;
+    const uR = floatToUint8((r - rgbMin) / rgbRange);
+    const uG = floatToUint8((g - rgbMin) / rgbRange);
+    const uB = floatToUint8((b - rgbMin) / rgbRange);
+    packedSplats[i4] =
+      uR | (uG << 8) | (uB << 16) | (packedSplats[i4] & 0xff000000);
+  } else {
+    const [_p0, p1] = packedSplats;
+    p1[i4] = encodeRgbE5S3(r, g, b);
+  }
 }
 
 // Encode the opacity in the packedSplats Uint32Array, leaving other fields alone.
 export function setPackedSplatOpacity(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   opacity: number,
 ) {
-  const uA = floatToUint8(opacity);
-
   const i4 = index * 4;
-  packedSplats[i4] = (packedSplats[i4] & 0x00ffffff) | (uA << 24);
+  if (!Array.isArray(packedSplats)) {
+    const uA = floatToUint8(opacity);
+    packedSplats[i4] = (packedSplats[i4] & 0x00ffffff) | (uA << 24);
+  } else {
+    const [p0, _p1] = packedSplats;
+    p0[i4 + 3] = toHalf(opacity) | (p0[i4 + 3] & 0xffff0000);
+  }
 }
 
 const packedCenter = new THREE.Vector3();
 const packedScales = new THREE.Vector3();
 const packedQuaternion = new THREE.Quaternion();
 const packedColor = new THREE.Color();
+const packedLods = new THREE.Vector4();
+const packedExtra = new THREE.Vector2();
 const packedFields = {
   center: packedCenter,
   scales: packedScales,
   quaternion: packedQuaternion,
   color: packedColor,
   opacity: 0.0,
+  lods: packedLods,
+  extra: packedExtra,
 };
 
 // Unpack all components of a PackedSplat from the packedSplats Uint32Array into
 // THREE.js vector objects. The returned objects will be reused each call.
 export function unpackSplat(
-  packedSplats: Uint32Array,
+  packedSplats: Uint32Array | Uint32Array[],
   index: number,
   encoding?: {
     rgbMin?: number;
@@ -613,48 +707,55 @@ export function unpackSplat(
   quaternion: THREE.Quaternion;
   color: THREE.Color;
   opacity: number;
+  lods: THREE.Vector4;
+  extra: THREE.Vector2;
 } {
   // Returns a static object which is reused each time
   const result = packedFields;
-
   const i4 = index * 4;
-  const word0 = packedSplats[i4];
-  const word1 = packedSplats[i4 + 1];
-  const word2 = packedSplats[i4 + 2];
-  const word3 = packedSplats[i4 + 3];
+  if (!Array.isArray(packedSplats)) {
+    const word0 = packedSplats[i4];
+    const word1 = packedSplats[i4 + 1];
+    const word2 = packedSplats[i4 + 2];
+    const word3 = packedSplats[i4 + 3];
 
-  const rgbMin = encoding?.rgbMin ?? 0.0;
-  const rgbMax = encoding?.rgbMax ?? 1.0;
-  const rgbRange = rgbMax - rgbMin;
-  result.color.set(
-    rgbMin + ((word0 & 0xff) / 255) * rgbRange,
-    rgbMin + (((word0 >>> 8) & 0xff) / 255) * rgbRange,
-    rgbMin + (((word0 >>> 16) & 0xff) / 255) * rgbRange,
-  );
-  result.opacity = ((word0 >>> 24) & 0xff) / 255;
-  result.center.set(
-    fromHalf(word1 & 0xffff),
-    fromHalf((word1 >>> 16) & 0xffff),
-    fromHalf(word2 & 0xffff),
-  );
+    const rgbMin = encoding?.rgbMin ?? 0.0;
+    const rgbMax = encoding?.rgbMax ?? 1.0;
+    const rgbRange = rgbMax - rgbMin;
+    result.color.set(
+      rgbMin + ((word0 & 0xff) / 255) * rgbRange,
+      rgbMin + (((word0 >>> 8) & 0xff) / 255) * rgbRange,
+      rgbMin + (((word0 >>> 16) & 0xff) / 255) * rgbRange,
+    );
+    result.opacity = ((word0 >>> 24) & 0xff) / 255;
+    result.center.set(
+      fromHalf(word1 & 0xffff),
+      fromHalf((word1 >>> 16) & 0xffff),
+      fromHalf(word2 & 0xffff),
+    );
 
-  const lnScaleMin = encoding?.lnScaleMin ?? LN_SCALE_MIN;
-  const lnScaleMax = encoding?.lnScaleMax ?? LN_SCALE_MAX;
-  const lnScaleScale = (lnScaleMax - lnScaleMin) / 254.0;
-  const uScalesX = word3 & 0xff;
-  result.scales.x =
-    uScalesX === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesX - 1) * lnScaleScale);
-  const uScalesY = (word3 >>> 8) & 0xff;
-  result.scales.y =
-    uScalesY === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesY - 1) * lnScaleScale);
-  const uScalesZ = (word3 >>> 16) & 0xff;
-  result.scales.z =
-    uScalesZ === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesZ - 1) * lnScaleScale);
+    decodeScale888(word3, result.scales, encoding);
 
-  const uQuat = ((word2 >>> 16) & 0xffff) | ((word3 >>> 8) & 0xff0000);
-  decodeQuatOctXy88R8(uQuat, result.quaternion);
-  // decodeQuatXyz888(uQuat, result.quaternion);
-  // decodeQuatEulerXyz888(uQuat, result.quaternion);
+    const uQuat = ((word2 >>> 16) & 0xffff) | ((word3 >>> 8) & 0xff0000);
+    decodeQuatOctXy88R8(uQuat, result.quaternion);
+    // decodeQuatXyz888(uQuat, result.quaternion);
+    // decodeQuatEulerXyz888(uQuat, result.quaternion);
+  } else {
+    const [p0, p1] = packedSplats;
+    result.center.set(
+      uintBitsToFloat(p0[i4]),
+      uintBitsToFloat(p0[i4 + 1]),
+      uintBitsToFloat(p0[i4 + 2]),
+    );
+    result.opacity = fromHalf(p0[i4 + 3] & 0xffff);
+    result.extra.set(
+      uintBitsToFloat((p0[i4 + 3] >> 16) & 0xff),
+      uintBitsToFloat((p0[i4 + 3] >> 24) & 0xff),
+    );
+    decodeRgbE5S3(p1[i4], result.color);
+    decodeQuatOctXy1010R12(p1[i4 + 1], result.quaternion);
+    decodeScaleLod9(p1, i4 + 2, result.scales, encoding, result.lods);
+  }
 
   return result;
 }
@@ -691,13 +792,7 @@ export function computeMaxSplats(numSplats: number): number {
   // Compute the size of a Gsplat array texture (2048x2048xD) that can fit
   // numSplats splats, and return the total number of splats that can be stored
   // in such a texture.
-  const width = SPLAT_TEX_WIDTH;
-  const height = Math.max(
-    SPLAT_TEX_MIN_HEIGHT,
-    Math.min(SPLAT_TEX_HEIGHT, Math.ceil(numSplats / width)),
-  );
-  const depth = Math.ceil(numSplats / (width * height));
-  return width * height * depth;
+  return getTextureSize(numSplats).maxSplats;
 }
 
 // Heuristic function to determine if we are running on a mobile device.
@@ -932,6 +1027,211 @@ export function epsilonSign(value: number, epsilon = 0.001): number {
   return Math.sign(value);
 }
 
+function encodeScale888(
+  scaleX: number,
+  scaleY: number,
+  scaleZ: number,
+  encoding?: {
+    lnScaleMin?: number;
+    lnScaleMax?: number;
+  },
+): number {
+  // Allow scales below LN_SCALE_MIN to be encoded as 0, which signifies a 2DGS
+  const lnScaleMin = encoding?.lnScaleMin ?? LN_SCALE_MIN;
+  const lnScaleMax = encoding?.lnScaleMax ?? LN_SCALE_MAX;
+  const lnScaleScale = 254.0 / (lnScaleMax - lnScaleMin);
+  const uScaleX =
+    scaleX < SCALE_ZERO
+      ? 0
+      : Math.min(
+          255,
+          Math.max(
+            1,
+            Math.round((Math.log(scaleX) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uScaleY =
+    scaleY < SCALE_ZERO
+      ? 0
+      : Math.min(
+          255,
+          Math.max(
+            1,
+            Math.round((Math.log(scaleY) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uScaleZ =
+    scaleZ < SCALE_ZERO
+      ? 0
+      : Math.min(
+          255,
+          Math.max(
+            1,
+            Math.round((Math.log(scaleZ) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  return uScaleX | (uScaleY << 8) | (uScaleZ << 16);
+}
+
+function decodeScale888(
+  uScales: number,
+  scales: THREE.Vector3,
+  encoding?: {
+    lnScaleMin?: number;
+    lnScaleMax?: number;
+  },
+) {
+  const lnScaleMin = encoding?.lnScaleMin ?? LN_SCALE_MIN;
+  const lnScaleMax = encoding?.lnScaleMax ?? LN_SCALE_MAX;
+  const lnScaleScale = (lnScaleMax - lnScaleMin) / 254.0;
+  const uScalesX = uScales & 0xff;
+  scales.x =
+    uScalesX === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesX - 1) * lnScaleScale);
+  const uScalesY = (uScales >>> 8) & 0xff;
+  scales.y =
+    uScalesY === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesY - 1) * lnScaleScale);
+  const uScalesZ = (uScales >>> 16) & 0xff;
+  scales.z =
+    uScalesZ === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesZ - 1) * lnScaleScale);
+}
+
+function encodeScaleLod9(
+  array: Uint32Array,
+  offset: number,
+  scaleX: number,
+  scaleY: number,
+  scaleZ: number,
+  lodMin: number,
+  lodLow: number,
+  lodHigh: number,
+  lodMax: number,
+  encoding?: {
+    lnScaleMin?: number;
+    lnScaleMax?: number;
+  },
+) {
+  // Allow scales below LN_SCALE_MIN to be encoded as 0, which signifies a 2DGS
+  const lnScaleMin = encoding?.lnScaleMin ?? EXT_LN_SCALE_MIN;
+  const lnScaleMax = encoding?.lnScaleMax ?? EXT_LN_SCALE_MAX;
+  const lnScaleScale = 510.0 / (lnScaleMax - lnScaleMin);
+  const uScaleX =
+    scaleX < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(scaleX) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uScaleY =
+    scaleY < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(scaleY) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uScaleZ =
+    scaleZ < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(scaleZ) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uLodMin =
+    lodMin < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodMin) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uLodLow =
+    lodLow < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodLow) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uLodHigh =
+    lodHigh < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodHigh) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uLodMax =
+    lodMax < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodMax) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  array[offset] =
+    uScaleX | (uScaleY << 9) | (uScaleZ << 18) | ((uLodMin & 0x1f) << 27);
+  array[offset + 1] =
+    (uLodMin >>> 5) | (uLodLow << 4) | (uLodHigh << 13) | (uLodMax << 22);
+}
+
+function decodeScaleLod9(
+  array: Uint32Array,
+  offset: number,
+  scales: THREE.Vector3,
+  encoding?: {
+    lnScaleMin?: number;
+    lnScaleMax?: number;
+  },
+  lods?: THREE.Vector4,
+) {
+  const u0 = array[offset];
+  const u1 = array[offset + 1];
+  const lnScaleMin = encoding?.lnScaleMin ?? EXT_LN_SCALE_MIN;
+  const lnScaleMax = encoding?.lnScaleMax ?? EXT_LN_SCALE_MAX;
+  const lnScaleScale = 510.0 / (lnScaleMax - lnScaleMin);
+  const uScalesX = u0 & 0x1ff;
+  scales.x =
+    uScalesX === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesX - 1) * lnScaleScale);
+  const uScalesY = (u0 >>> 9) & 0x1ff;
+  scales.y =
+    uScalesY === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesY - 1) * lnScaleScale);
+  const uScalesZ = (u0 >>> 18) & 0x1ff;
+  scales.z =
+    uScalesZ === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesZ - 1) * lnScaleScale);
+  if (lods) {
+    const uLodMin = (u0 >>> 27) | ((u1 & 0x1f) << 5);
+    lods.x =
+      uLodMin === 0 ? 0.0 : Math.exp(lnScaleMin + (uLodMin - 1) * lnScaleScale);
+    const uLodLow = (u1 >>> 4) & 0x1ff;
+    lods.y =
+      uLodLow === 0 ? 0.0 : Math.exp(lnScaleMin + (uLodLow - 1) * lnScaleScale);
+    const uLodHigh = (u1 >>> 13) & 0x1ff;
+    lods.z =
+      uLodHigh === 0
+        ? 0.0
+        : Math.exp(lnScaleMin + (uLodHigh - 1) * lnScaleScale);
+    const uLodMax = (u1 >>> 22) & 0x1ff;
+    lods.w =
+      uLodMax === 0 ? 0.0 : Math.exp(lnScaleMin + (uLodMax - 1) * lnScaleScale);
+  }
+}
+
 // Encode a THREE.Quaternion into a 24-bit integer, converting the xyz coordinates
 // to signed 8-bit integers (w can be derived from xyz), and flipping the sign
 // of the quaternion if necessary to make this possible (q == -q for quaternions).
@@ -970,31 +1270,33 @@ export function decodeQuatXyz888(
  *
  * This version uses folded octahedral mapping (all inline).
  */
-export function encodeQuatOctXy88R8(q: THREE.Quaternion): number {
+export function encodeQuatOctXy88R8(
+  qx: number,
+  qy: number,
+  qz: number,
+  qw: number,
+): number {
+  const qlen = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
   // Force the minimal representation (q.w >= 0)
-  const qnorm = q.clone().normalize();
-  if (qnorm.w < 0) {
-    qnorm.set(-qnorm.x, -qnorm.y, -qnorm.z, -qnorm.w);
-  }
+  const qnx = (qw < 0 ? -qx : qx) / qlen;
+  const qny = (qw < 0 ? -qy : qy) / qlen;
+  const qnz = (qw < 0 ? -qz : qz) / qlen;
+  const qnw = (qw < 0 ? -qw : qw) / qlen;
   // Compute the rotation angle θ in [0, π]
-  const theta = 2 * Math.acos(qnorm.w);
+  const theta = 2 * Math.acos(qnw);
   // Recover the rotation axis (default to (1,0,0) for near-zero rotation)
-  const xyz_norm = Math.sqrt(
-    qnorm.x * qnorm.x + qnorm.y * qnorm.y + qnorm.z * qnorm.z,
-  );
-  const axis =
-    xyz_norm < 1e-6
-      ? new THREE.Vector3(1, 0, 0)
-      : new THREE.Vector3(qnorm.x, qnorm.y, qnorm.z).divideScalar(xyz_norm);
-  // const foldAxis = (axis.z < 0);
+  const xyz_norm = Math.sqrt(qnx * qnx + qny * qny + qnz * qnz);
+  const axisX = xyz_norm < 1e-6 ? 0 : qnx / xyz_norm;
+  const axisY = xyz_norm < 1e-6 ? 0 : qny / xyz_norm;
+  const axisZ = xyz_norm < 1e-6 ? 0 : qnz / xyz_norm;
 
   // --- Folded Octahedral Mapping (inline) ---
   // Compute p = (axis.x, axis.y) / (|axis.x|+|axis.y|+|axis.z|)
-  const sum = Math.abs(axis.x) + Math.abs(axis.y) + Math.abs(axis.z);
-  let p_x = axis.x / sum;
-  let p_y = axis.y / sum;
+  const sum = Math.abs(axisX) + Math.abs(axisY) + Math.abs(axisZ);
+  let p_x = axisX / sum;
+  let p_y = axisY / sum;
   // Fold the lower hemisphere.
-  if (axis.z < 0) {
+  if (axisZ < 0) {
     const tmp = p_x;
     p_x = (1 - Math.abs(p_y)) * (p_x >= 0 ? 1 : -1);
     p_y = (1 - Math.abs(tmp)) * (p_y >= 0 ? 1 : -1);
@@ -1002,14 +1304,58 @@ export function encodeQuatOctXy88R8(q: THREE.Quaternion): number {
   // Remap from [-1,1] to [0,1]
   const u_f = p_x * 0.5 + 0.5;
   const v_f = p_y * 0.5 + 0.5;
-  // Quantize to 7 bits (0..127)
+  // Quantize to 8 bits (0..255)
   const quantU = Math.round(u_f * 255);
   const quantV = Math.round(v_f * 255);
-  // --- Angle Quantization: Quantize θ ∈ [0,π] to 10 bits (0..1023) ---
+  // --- Angle Quantization: Quantize θ ∈ [0,π] to 8 bits (0..255) ---
   const angleInt = Math.round(theta * (255 / Math.PI));
 
   // Pack into 24 bits: bits [0–7]: quantU, [8–15]: quantV, [16–23]: angleInt.
   return (angleInt << 16) | (quantV << 8) | quantU;
+}
+
+export function encodeQuatOctXy1010R12(
+  qx: number,
+  qy: number,
+  qz: number,
+  qw: number,
+): number {
+  const qlen = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+  // Force the minimal representation (q.w >= 0)
+  const qnx = (qw < 0 ? -qx : qx) / qlen;
+  const qny = (qw < 0 ? -qy : qy) / qlen;
+  const qnz = (qw < 0 ? -qz : qz) / qlen;
+  const qnw = (qw < 0 ? -qw : qw) / qlen;
+  // Compute the rotation angle θ in [0, π]
+  const theta = 2 * Math.acos(qnw);
+  // Recover the rotation axis (default to (1,0,0) for near-zero rotation)
+  const xyz_norm = Math.sqrt(qnx * qnx + qny * qny + qnz * qnz);
+  const axisX = xyz_norm < 1e-6 ? 0 : qnx / xyz_norm;
+  const axisY = xyz_norm < 1e-6 ? 0 : qny / xyz_norm;
+  const axisZ = xyz_norm < 1e-6 ? 0 : qnz / xyz_norm;
+
+  // --- Folded Octahedral Mapping (inline) ---
+  // Compute p = (axis.x, axis.y) / (|axis.x|+|axis.y|+|axis.z|)
+  const sum = Math.abs(axisX) + Math.abs(axisY) + Math.abs(axisZ);
+  let p_x = axisX / sum;
+  let p_y = axisY / sum;
+  // Fold the lower hemisphere.
+  if (axisZ < 0) {
+    const tmp = p_x;
+    p_x = (1 - Math.abs(p_y)) * (p_x >= 0 ? 1 : -1);
+    p_y = (1 - Math.abs(tmp)) * (p_y >= 0 ? 1 : -1);
+  }
+  // Remap from [-1,1] to [0,1]
+  const u_f = p_x * 0.5 + 0.5;
+  const v_f = p_y * 0.5 + 0.5;
+  // Quantize to 10 bits (0..1023)
+  const quantU = Math.round(u_f * 1023);
+  const quantV = Math.round(v_f * 1023);
+  // --- Angle Quantization: Quantize θ ∈ [0,π] to 12 bits (0..4095) ---
+  const angleInt = Math.round(theta * (4095 / Math.PI));
+
+  // Pack into 32 bits: bits [0–9]: quantU, [10–19]: quantV, [20–31]: angleInt.
+  return (angleInt << 20) | (quantV << 10) | quantU;
 }
 
 /**
@@ -1036,7 +1382,10 @@ export function decodeQuatOctXy88R8(
   const t = Math.max(-f_z, 0);
   f_x += f_x >= 0 ? -t : t;
   f_y += f_y >= 0 ? -t : t;
-  const axis = new THREE.Vector3(f_x, f_y, f_z).normalize();
+  const axisLen = Math.sqrt(f_x * f_x + f_y * f_y + f_z * f_z);
+  const axisX = axisLen < 1e-6 ? 0 : f_x / axisLen;
+  const axisY = axisLen < 1e-6 ? 0 : f_y / axisLen;
+  const axisZ = axisLen < 1e-6 ? 0 : f_z / axisLen;
 
   // Decode the angle: θ ∈ [0,π]
   const theta = (angleInt / 255) * Math.PI;
@@ -1044,7 +1393,41 @@ export function decodeQuatOctXy88R8(
   const s = Math.sin(halfTheta);
   const w = Math.cos(halfTheta);
   // Reconstruct the quaternion from axis-angle: (axis * sin(θ/2), cos(θ/2))
-  out.set(axis.x * s, axis.y * s, axis.z * s, w);
+  out.set(axisX * s, axisY * s, axisZ * s, w);
+  return out;
+}
+
+export function decodeQuatOctXy1010R12(
+  encoded: number,
+  out: THREE.Quaternion,
+): THREE.Quaternion {
+  // Extract 10‐bit quantU and quantV, and 12‐bit angleInt.
+  const quantU = encoded & 0x3ff; // bits 0–9
+  const quantV = (encoded >>> 10) & 0x3ff; // bits 10–19
+  const angleInt = (encoded >>> 20) & 0xfff; // bits 20–31
+
+  // Recover u and v in [0,1] then map to [-1,1]
+  const u_f = quantU / 1023;
+  const v_f = quantV / 1023;
+  let f_x = (u_f - 0.5) * 2;
+  let f_y = (v_f - 0.5) * 2;
+  // Inverse folded mapping: recover z from the constraint |p_x|+|p_y|+z = 1.
+  const f_z = 1 - (Math.abs(f_x) + Math.abs(f_y));
+  const t = Math.max(-f_z, 0);
+  f_x += f_x >= 0 ? -t : t;
+  f_y += f_y >= 0 ? -t : t;
+  const axisLen = Math.sqrt(f_x * f_x + f_y * f_y + f_z * f_z);
+  const axisX = axisLen < 1e-6 ? 0 : f_x / axisLen;
+  const axisY = axisLen < 1e-6 ? 0 : f_y / axisLen;
+  const axisZ = axisLen < 1e-6 ? 0 : f_z / axisLen;
+
+  // Decode the angle: θ ∈ [0,π]
+  const theta = (angleInt / 4095) * Math.PI;
+  const halfTheta = theta * 0.5;
+  const s = Math.sin(halfTheta);
+  const w = Math.cos(halfTheta);
+  // Reconstruct the quaternion from axis-angle: (axis * sin(θ/2), cos(θ/2))
+  out.set(axisX * s, axisY * s, axisZ * s, w);
   return out;
 }
 

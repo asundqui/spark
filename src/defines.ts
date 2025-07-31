@@ -9,6 +9,11 @@ export const LN_SCALE_MAX = 9.0;
 export const SCALE_MIN = Math.exp(LN_SCALE_MIN);
 export const SCALE_MAX = Math.exp(LN_SCALE_MAX);
 
+export const EXT_LN_SCALE_MIN = -14.0;
+export const EXT_LN_SCALE_MAX = 14.0;
+export const EXT_SCALE_MIN = Math.exp(EXT_LN_SCALE_MIN); // 1/1202604 (less than 1/1M)
+export const EXT_SCALE_MAX = Math.exp(EXT_LN_SCALE_MAX); // 1202604 (more than 1M)
+
 export const LN_SCALE_ZERO = -30.0;
 export const SCALE_ZERO = Math.exp(LN_SCALE_ZERO);
 

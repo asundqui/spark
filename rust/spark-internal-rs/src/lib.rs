@@ -14,7 +14,7 @@ const RAYCAST_BUFFER_COUNT: u32 = 65536;
 thread_local! {
     static SORT_BUFFERS: RefCell<SortBuffers> = RefCell::new(SortBuffers::default());
     static SORT32_BUFFERS: RefCell<Sort32Buffers> = RefCell::new(Sort32Buffers::default());
-    static RAYCAST_BUFFER: RefCell<Vec<u32>> = RefCell::new(vec![0; RAYCAST_BUFFER_COUNT as usize * 4]);
+    static RAYCAST_BUFFER: RefCell<[Vec<u32>; 2]> = RefCell::new([vec![0; RAYCAST_BUFFER_COUNT as usize * 4], vec![0; RAYCAST_BUFFER_COUNT as usize * 4]]);
 }
 
 #[wasm_bindgen]
@@ -80,24 +80,34 @@ pub fn raycast_splats(
     origin_x: f32, origin_y: f32, origin_z: f32,
     dir_x: f32, dir_y: f32, dir_z: f32,
     near: f32, far: f32,
-    num_splats: u32, packed_splats: Uint32Array,
+    num_splats: u32, packed_splats: Uint32Array, packed_splats2: Option<Uint32Array>,
     raycast_ellipsoid: bool,
     ln_scale_min: f32, ln_scale_max: f32,
 ) -> Float32Array {
     let mut distances = Vec::<f32>::new();
 
     _ = RAYCAST_BUFFER.with_borrow_mut(|buffer| {
+        let (buffer1, buffer2) = buffer.split_at_mut(1);
         let mut base = 0;
         while base < num_splats {
             let chunk_size = RAYCAST_BUFFER_COUNT.min(num_splats - base);
             let subarray = packed_splats.subarray(4 * base, 4 * (base + chunk_size));
-            let subbuffer = &mut buffer[0..(4 * chunk_size as usize)];
+            let subbuffer = &mut buffer1[0][0..(4 * chunk_size as usize)];
             subarray.copy_to(subbuffer);
 
-            if raycast_ellipsoid {
-                raycast_ellipsoids(subbuffer, &mut distances, [origin_x, origin_y, origin_z], [dir_x, dir_y, dir_z], near, far, ln_scale_min, ln_scale_max);
+            let subbuffer2 = if let Some(packed_splats2) = packed_splats2.as_ref() {
+                let subarray2 = packed_splats2.subarray(4 * base, 4 * (base + chunk_size));
+                let subbuffer2 = &mut buffer2[0][0..(4 * chunk_size as usize)];
+                subarray2.copy_to(subbuffer2);
+                Some(subbuffer2)
             } else {
-                raycast_spheres(subbuffer, &mut distances, [origin_x, origin_y, origin_z], [dir_x, dir_y, dir_z], near, far, ln_scale_min, ln_scale_max);
+                None
+            };
+
+            if raycast_ellipsoid {
+                raycast_ellipsoids(subbuffer, subbuffer2.as_deref(), &mut distances, [origin_x, origin_y, origin_z], [dir_x, dir_y, dir_z], near, far, ln_scale_min, ln_scale_max);
+            } else {
+                raycast_spheres(subbuffer, subbuffer2.as_deref(), &mut distances, [origin_x, origin_y, origin_z], [dir_x, dir_y, dir_z], near, far, ln_scale_min, ln_scale_max);
             }
 
             base += chunk_size;

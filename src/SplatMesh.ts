@@ -191,10 +191,9 @@ export class SplatMesh extends SplatGenerator {
         this.update({ time, deltaTime, viewToWorld, globalEdits }),
     });
 
-    this.packedSplats = options.packedSplats ?? new PackedSplats();
-    this.packedSplats.splatEncoding = options.splatEncoding ?? {
-      ...DEFAULT_SPLAT_ENCODING,
-    };
+    this.packedSplats =
+      options.packedSplats ??
+      new PackedSplats({ splatEncoding: options.splatEncoding });
     this.numSplats = this.packedSplats.numSplats;
     this.editable = options.editable ?? true;
     this.onFrame = options.onFrame;
@@ -576,7 +575,12 @@ export class SplatMesh extends SplatGenerator {
       near,
       far,
       this.packedSplats.numSplats,
-      this.packedSplats.packedArray,
+      Array.isArray(this.packedSplats.packedArray)
+        ? this.packedSplats.packedArray[0]
+        : this.packedSplats.packedArray,
+      Array.isArray(this.packedSplats.packedArray)
+        ? this.packedSplats.packedArray[1]
+        : undefined,
       RAYCAST_ELLIPSOID,
       this.packedSplats.splatEncoding?.lnScaleMin ?? LN_SCALE_MIN,
       this.packedSplats.splatEncoding?.lnScaleMax ?? LN_SCALE_MAX,

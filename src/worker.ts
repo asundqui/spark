@@ -38,13 +38,11 @@ async function onMessage(event: MessageEvent) {
   try {
     switch (name) {
       case "unpackPly": {
-        const { packedArray, fileBytes, splatEncoding } = args as {
-          packedArray: Uint32Array;
+        const { fileBytes, splatEncoding } = args as {
           fileBytes: Uint8Array;
           splatEncoding: SplatEncoding;
         };
         const decoded = await unpackPly({
-          packedArray,
           fileBytes,
           splatEncoding,
         });
@@ -298,21 +296,25 @@ function benchmarkSort(
 }
 
 async function unpackPly({
-  packedArray,
   fileBytes,
   splatEncoding,
 }: {
-  packedArray: Uint32Array;
   fileBytes: Uint8Array;
   splatEncoding: SplatEncoding;
 }): Promise<{
-  packedArray: Uint32Array;
+  packedArray: Uint32Array | Uint32Array[];
   numSplats: number;
   extra: Record<string, unknown>;
 }> {
   const ply = new PlyReader({ fileBytes });
   await ply.parseHeader();
   const numSplats = ply.numSplats;
+  const maxSplats = computeMaxSplats(numSplats);
+  const packedArray = splatEncoding.extended
+    ? Array(2)
+        .fill(null)
+        .map(() => new Uint32Array(maxSplats * 4))
+    : new Uint32Array(maxSplats * 4);
 
   const extra: Record<string, unknown> = {};
 
@@ -383,14 +385,18 @@ function unpackSpz(
   fileBytes: Uint8Array,
   splatEncoding: SplatEncoding,
 ): {
-  packedArray: Uint32Array;
+  packedArray: Uint32Array | Uint32Array[];
   numSplats: number;
   extra: Record<string, unknown>;
 } {
   const spz = new SpzReader({ fileBytes });
   const numSplats = spz.numSplats;
   const maxSplats = computeMaxSplats(numSplats);
-  const packedArray = new Uint32Array(maxSplats * 4);
+  const packedArray = splatEncoding.extended
+    ? Array(2)
+        .fill(null)
+        .map(() => new Uint32Array(maxSplats * 4))
+    : new Uint32Array(maxSplats * 4);
   const extra: Record<string, unknown> = {};
 
   spz.parseSplats(

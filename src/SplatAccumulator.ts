@@ -1,6 +1,6 @@
 import * as THREE from "three";
 
-import { PackedSplats } from "./PackedSplats";
+import { PackedSplats, type SplatEncoding } from "./PackedSplats";
 import type {
   GsplatGenerator,
   SplatGenerator,
@@ -22,7 +22,7 @@ export type GeneratorMapping = {
 };
 
 export class SplatAccumulator {
-  splats = new PackedSplats();
+  splats: PackedSplats;
   // The transform from Accumulator coordinate system to world coordinates.
   toWorld = new THREE.Matrix4();
   // An array of all Gsplat mappings that were used for generation
@@ -36,6 +36,10 @@ export class SplatAccumulator {
   // Incremented every time the splat mapping/layout is updated.
   // Splat sort order can be reused between equivalent mapping versions.
   mappingVersion = -1;
+
+  constructor({ splatEncoding }: { splatEncoding: SplatEncoding }) {
+    this.splats = new PackedSplats({ splatEncoding });
+  }
 
   ensureGenerate(maxSplats: number) {
     if (this.splats.ensureGenerate(maxSplats)) {

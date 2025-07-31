@@ -8,7 +8,7 @@ import {
 import { SplatMesh } from "./SplatMesh";
 import { PlyReader } from "./ply";
 import { withWorker } from "./splatWorker";
-import { decompressPartialGzip, getTextureSize } from "./utils";
+import { computeMaxSplats, decompressPartialGzip } from "./utils";
 
 // SplatLoader implements the THREE.Loader interface and supports loading a variety
 // of different Gsplat file formats. Formats .PLY and .SPZ can be auto-detected
@@ -411,7 +411,7 @@ export async function unpackSplats({
   pathOrUrl?: string;
   splatEncoding?: SplatEncoding;
 }): Promise<{
-  packedArray: Uint32Array;
+  packedArray: Uint32Array | Uint32Array[];
   numSplats: number;
   extra?: Record<string, unknown>;
 }> {
@@ -427,21 +427,15 @@ export async function unpackSplats({
 
   switch (splatFileType) {
     case SplatFileType.PLY: {
-      const ply = new PlyReader({ fileBytes });
-      await ply.parseHeader();
-      const numSplats = ply.numSplats;
-      const maxSplats = getTextureSize(numSplats).maxSplats;
-      const args = {
-        fileBytes,
-        packedArray: new Uint32Array(maxSplats * 4),
-        splatEncoding,
-      };
       return await withWorker(async (worker) => {
         const { packedArray, numSplats, extra } = (await worker.call(
           "unpackPly",
-          args,
+          {
+            fileBytes,
+            splatEncoding,
+          },
         )) as {
-          packedArray: Uint32Array;
+          packedArray: Uint32Array | Uint32Array[];
           numSplats: number;
           extra: Record<string, unknown>;
         };
@@ -457,7 +451,7 @@ export async function unpackSplats({
             splatEncoding,
           },
         )) as {
-          packedArray: Uint32Array;
+          packedArray: Uint32Array | Uint32Array[];
           numSplats: number;
           extra: Record<string, unknown>;
         };
@@ -472,7 +466,7 @@ export async function unpackSplats({
             fileBytes,
             splatEncoding,
           },
-        )) as { packedArray: Uint32Array; numSplats: number };
+        )) as { packedArray: Uint32Array | Uint32Array[]; numSplats: number };
         return { packedArray, numSplats };
       });
     }
@@ -482,7 +476,7 @@ export async function unpackSplats({
           "decodeKsplat",
           { fileBytes, splatEncoding },
         )) as {
-          packedArray: Uint32Array;
+          packedArray: Uint32Array | Uint32Array[];
           numSplats: number;
           extra: Record<string, unknown>;
         };
@@ -495,7 +489,7 @@ export async function unpackSplats({
           "decodePcSogs",
           { fileBytes, extraFiles, splatEncoding },
         )) as {
-          packedArray: Uint32Array;
+          packedArray: Uint32Array | Uint32Array[];
           numSplats: number;
           extra: Record<string, unknown>;
         };
@@ -508,7 +502,7 @@ export async function unpackSplats({
           "decodePcSogsZip",
           { fileBytes, splatEncoding },
         )) as {
-          packedArray: Uint32Array;
+          packedArray: Uint32Array | Uint32Array[];
           numSplats: number;
           extra: Record<string, unknown>;
         };
@@ -535,7 +529,7 @@ export class SplatData {
 
   constructor({ maxSplats = 1 }: { maxSplats?: number } = {}) {
     this.numSplats = 0;
-    this.maxSplats = getTextureSize(maxSplats).maxSplats;
+    this.maxSplats = computeMaxSplats(maxSplats);
     this.centers = new Float32Array(this.maxSplats * 3);
     this.scales = new Float32Array(this.maxSplats * 3);
     this.quaternions = new Float32Array(this.maxSplats * 4);

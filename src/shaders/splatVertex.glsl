@@ -17,6 +17,7 @@ uniform uint numSplats;
 uniform vec4 renderToViewQuat;
 uniform vec3 renderToViewPos;
 uniform float maxStdDev;
+uniform float minPixelRadius;
 uniform float maxPixelRadius;
 uniform float time;
 uniform float deltaTime;
@@ -32,6 +33,8 @@ uniform float clipXY;
 uniform float focalAdjustment;
 
 uniform usampler2DArray packedSplats;
+uniform usampler2DArray packedSplats2;
+uniform bool extended;
 uniform vec4 rgbMinMaxLnScaleMinMax;
 
 void main() {
@@ -43,6 +46,9 @@ void main() {
     }
 
     ivec3 texCoord;
+    vec3 center, scales;
+    vec4 quaternion, rgba, lods;
+
     if (stochastic) {
         texCoord = ivec3(
             uint(gl_InstanceID) & SPLAT_TEX_WIDTH_MASK,
@@ -60,11 +66,14 @@ void main() {
             splatIndex >> SPLAT_TEX_LAYER_BITS
         );
     }
-    uvec4 packed = texelFetch(packedSplats, texCoord, 0);
 
-    vec3 center, scales;
-    vec4 quaternion, rgba;
-    unpackSplatEncoding(packed, center, scales, quaternion, rgba, rgbMinMaxLnScaleMinMax);
+    uvec4 packed = texelFetch(packedSplats, texCoord, 0);
+    if (!extended) {
+        unpackSplatEncoding(packed, center, scales, quaternion, rgba, rgbMinMaxLnScaleMinMax);
+    } else {
+        uvec4 packed2 = texelFetch(packedSplats2, texCoord, 0);
+        unpackSplatExt(packed, packed2, center, scales, quaternion, rgba, lods, rgbMinMaxLnScaleMinMax.zw);
+    }
 
     if (rgba.a < minAlpha) {
         return;
@@ -142,11 +151,6 @@ void main() {
 
     // Compute the 2D covariance by projecting the 3D covariance
     // and picking out the XY plane components.
-    // Keeping below because we may need it in the future
-    // for skinning deformations.
-    // mat3 W = transpose(mat3(viewMatrix));
-    // mat3 T = W * J;
-    // mat3 cov2D = transpose(T) * cov3D * T;
     mat3 cov2D = transpose(J) * cov3D * J;
     float a = cov2D[0][0];
     float d = cov2D[1][1];
@@ -189,11 +193,14 @@ void main() {
     vec2 eigenVec1 = normalize(vec2((abs(b) < 0.001) ? 1.0 : b, eigen1 - a));
     vec2 eigenVec2 = vec2(eigenVec1.y, -eigenVec1.x);
 
-    float scale1 = position.x * min(maxPixelRadius, maxStdDev * sqrt(eigen1));
-    float scale2 = position.y * min(maxPixelRadius, maxStdDev * sqrt(eigen2));
+    float scale1 = min(maxPixelRadius, maxStdDev * sqrt(eigen1));
+    float scale2 = min(maxPixelRadius, maxStdDev * sqrt(eigen2));
+    if ((scale1 < minPixelRadius) && (scale2 < minPixelRadius)) {
+        return;
+    }
 
     // Compute the NDC coordinates for the ellipsoid's diagonal axes.
-    vec2 pixelOffset = eigenVec1 * scale1 + eigenVec2 * scale2;
+    vec2 pixelOffset = eigenVec1 * scale1 * position.x + eigenVec2 * scale2 * position.y;
     vec2 ndcOffset = (2.0 / scaledRenderSize) * pixelOffset;
     vec3 ndc = vec3(ndcCenter.xy + ndcOffset, ndcCenter.z);
 

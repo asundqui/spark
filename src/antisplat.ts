@@ -70,18 +70,22 @@ export function unpackAntiSplat(
   fileBytes: Uint8Array,
   splatEncoding: SplatEncoding,
 ): {
-  packedArray: Uint32Array;
+  packedArray: Uint32Array | Uint32Array[];
   numSplats: number;
 } {
   let numSplats = 0;
   let maxSplats = 0;
-  let packedArray = new Uint32Array(0);
+  let packedArray: Uint32Array | Uint32Array[] = new Uint32Array(0);
   decodeAntiSplat(
     fileBytes,
     (cbNumSplats) => {
       numSplats = cbNumSplats;
       maxSplats = computeMaxSplats(numSplats);
-      packedArray = new Uint32Array(maxSplats * 4);
+      packedArray = splatEncoding.extended
+        ? Array(2)
+            .fill(null)
+            .map(() => new Uint32Array(maxSplats * 4))
+        : new Uint32Array(maxSplats * 4);
     },
     (
       index,
