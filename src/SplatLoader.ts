@@ -1,6 +1,7 @@
 import { unzipSync } from "fflate";
 import { FileLoader, Loader, type LoadingManager } from "three";
 import {
+  DEFAULT_EXT_SPLAT_ENCODING,
   DEFAULT_SPLAT_ENCODING,
   PackedSplats,
   type SplatEncoding,
@@ -20,6 +21,7 @@ export class SplatLoader extends Loader {
   fileLoader: FileLoader;
   fileType?: SplatFileType;
   packedSplats?: PackedSplats;
+  splatEncoding?: SplatEncoding;
 
   constructor(manager?: LoadingManager) {
     super(manager);
@@ -115,7 +117,11 @@ export class SplatLoader extends Loader {
         await Promise.all(promises);
         if (onLoad) {
           const splatEncoding =
-            this.packedSplats?.splatEncoding ?? DEFAULT_SPLAT_ENCODING;
+            (this.splatEncoding ??
+            this.packedSplats?.splatEncoding ??
+            PackedSplats.defaultExtended)
+              ? { ...DEFAULT_EXT_SPLAT_ENCODING }
+              : { ...DEFAULT_SPLAT_ENCODING };
           const decoded = await unpackSplats({
             input,
             extraFiles,
@@ -398,6 +404,13 @@ export function tryPcSogsZip(
   }
 }
 
+type DecodeResult = {
+  packedArray: Uint32Array | Uint32Array[];
+  numSplats: number;
+  extra?: Record<string, unknown>;
+  splatEncoding: SplatEncoding;
+};
+
 export async function unpackSplats({
   input,
   extraFiles,
@@ -410,11 +423,7 @@ export async function unpackSplats({
   fileType?: SplatFileType;
   pathOrUrl?: string;
   splatEncoding?: SplatEncoding;
-}): Promise<{
-  packedArray: Uint32Array | Uint32Array[];
-  numSplats: number;
-  extra?: Record<string, unknown>;
-}> {
+}): Promise<DecodeResult> {
   const fileBytes =
     input instanceof ArrayBuffer ? new Uint8Array(input) : input;
   let splatFileType = fileType;
@@ -428,85 +437,51 @@ export async function unpackSplats({
   switch (splatFileType) {
     case SplatFileType.PLY: {
       return await withWorker(async (worker) => {
-        const { packedArray, numSplats, extra } = (await worker.call(
-          "unpackPly",
-          {
-            fileBytes,
-            splatEncoding,
-          },
-        )) as {
-          packedArray: Uint32Array | Uint32Array[];
-          numSplats: number;
-          extra: Record<string, unknown>;
-        };
-        return { packedArray, numSplats, extra };
+        return (await worker.call("unpackPly", {
+          fileBytes,
+          splatEncoding,
+        })) as DecodeResult;
       });
     }
     case SplatFileType.SPZ: {
       return await withWorker(async (worker) => {
-        const { packedArray, numSplats, extra } = (await worker.call(
-          "decodeSpz",
-          {
-            fileBytes,
-            splatEncoding,
-          },
-        )) as {
-          packedArray: Uint32Array | Uint32Array[];
-          numSplats: number;
-          extra: Record<string, unknown>;
-        };
-        return { packedArray, numSplats, extra };
+        return (await worker.call("decodeSpz", {
+          fileBytes,
+          splatEncoding,
+        })) as DecodeResult;
       });
     }
     case SplatFileType.SPLAT: {
       return await withWorker(async (worker) => {
-        const { packedArray, numSplats } = (await worker.call(
-          "decodeAntiSplat",
-          {
-            fileBytes,
-            splatEncoding,
-          },
-        )) as { packedArray: Uint32Array | Uint32Array[]; numSplats: number };
-        return { packedArray, numSplats };
+        return (await worker.call("decodeAntiSplat", {
+          fileBytes,
+          splatEncoding,
+        })) as DecodeResult;
       });
     }
     case SplatFileType.KSPLAT: {
       return await withWorker(async (worker) => {
-        const { packedArray, numSplats, extra } = (await worker.call(
-          "decodeKsplat",
-          { fileBytes, splatEncoding },
-        )) as {
-          packedArray: Uint32Array | Uint32Array[];
-          numSplats: number;
-          extra: Record<string, unknown>;
-        };
-        return { packedArray, numSplats, extra };
+        return (await worker.call("decodeKsplat", {
+          fileBytes,
+          splatEncoding,
+        })) as DecodeResult;
       });
     }
     case SplatFileType.PCSOGS: {
       return await withWorker(async (worker) => {
-        const { packedArray, numSplats, extra } = (await worker.call(
-          "decodePcSogs",
-          { fileBytes, extraFiles, splatEncoding },
-        )) as {
-          packedArray: Uint32Array | Uint32Array[];
-          numSplats: number;
-          extra: Record<string, unknown>;
-        };
-        return { packedArray, numSplats, extra };
+        return (await worker.call("decodePcSogs", {
+          fileBytes,
+          extraFiles,
+          splatEncoding,
+        })) as DecodeResult;
       });
     }
     case SplatFileType.PCSOGSZIP: {
       return await withWorker(async (worker) => {
-        const { packedArray, numSplats, extra } = (await worker.call(
-          "decodePcSogsZip",
-          { fileBytes, splatEncoding },
-        )) as {
-          packedArray: Uint32Array | Uint32Array[];
-          numSplats: number;
-          extra: Record<string, unknown>;
-        };
-        return { packedArray, numSplats, extra };
+        return (await worker.call("decodePcSogsZip", {
+          fileBytes,
+          splatEncoding,
+        })) as DecodeResult;
       });
     }
     default: {

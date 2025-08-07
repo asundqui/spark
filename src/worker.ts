@@ -51,6 +51,7 @@ async function onMessage(event: MessageEvent) {
           numSplats: decoded.numSplats,
           packedArray: decoded.packedArray,
           extra: decoded.extra,
+          splatEncoding,
         };
         break;
       }
@@ -65,6 +66,7 @@ async function onMessage(event: MessageEvent) {
           numSplats: decoded.numSplats,
           packedArray: decoded.packedArray,
           extra: decoded.extra,
+          splatEncoding,
         };
         break;
       }
@@ -78,6 +80,7 @@ async function onMessage(event: MessageEvent) {
           id,
           numSplats: decoded.numSplats,
           packedArray: decoded.packedArray,
+          splatEncoding,
         };
         break;
       }
@@ -92,6 +95,7 @@ async function onMessage(event: MessageEvent) {
           numSplats: decoded.numSplats,
           packedArray: decoded.packedArray,
           extra: decoded.extra,
+          splatEncoding,
         };
         break;
       }
@@ -110,6 +114,7 @@ async function onMessage(event: MessageEvent) {
           numSplats: decoded.numSplats,
           packedArray: decoded.packedArray,
           extra: decoded.extra,
+          splatEncoding,
         };
         break;
       }
@@ -124,6 +129,7 @@ async function onMessage(event: MessageEvent) {
           numSplats: decoded.numSplats,
           packedArray: decoded.packedArray,
           extra: decoded.extra,
+          splatEncoding,
         };
         break;
       }

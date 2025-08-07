@@ -28,6 +28,7 @@ import {
   computeMaxSplats,
   getTextureSize,
   setPackedSplat,
+  threeMrtArray,
   unpackSplat,
 } from "./utils";
 
@@ -207,6 +208,11 @@ export class PackedSplats {
 
     this.extra = {};
     this.splatEncoding = options.splatEncoding;
+    if (!this.splatEncoding) {
+      this.splatEncoding = PackedSplats.defaultExtended
+        ? { ...DEFAULT_EXT_SPLAT_ENCODING }
+        : { ...DEFAULT_SPLAT_ENCODING };
+    }
 
     if (options.url || options.fileBytes || options.construct) {
       // We need to initialize asynchronously given the options
@@ -222,6 +228,9 @@ export class PackedSplats {
   }
 
   initialize(options: PackedSplatsOptions) {
+    if (options.splatEncoding) {
+      this.splatEncoding = options.splatEncoding;
+    }
     if (options.packedArray) {
       this.packedArray = options.packedArray;
       // Calculate number of horizontal texture rows that could fit in array.
@@ -248,17 +257,11 @@ export class PackedSplats {
       loader.packedSplats = this;
       await loader.loadAsync(url);
     } else if (fileBytes) {
-      let splatEncoding = options.splatEncoding;
-      if (!splatEncoding) {
-        splatEncoding = PackedSplats.defaultExtended
-          ? DEFAULT_EXT_SPLAT_ENCODING
-          : DEFAULT_SPLAT_ENCODING;
-      }
       const unpacked = await unpackSplats({
         input: fileBytes,
         fileType: options.fileType,
         pathOrUrl: options.fileName ?? url,
-        splatEncoding,
+        splatEncoding: this.splatEncoding,
       });
       this.initialize(unpacked);
     }
@@ -518,6 +521,11 @@ export class PackedSplats {
     this.target.scissorTest = true;
     const extended = this.splatEncoding?.extended ?? false;
     if (extended) {
+      if (!threeMrtArray) {
+        throw new Error(
+          "splatEncoding.extended requires THREE.js r179 or above",
+        );
+      }
       this.target.textures = [this.target.texture, this.target.texture.clone()];
     }
     return true;

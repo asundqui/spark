@@ -15,7 +15,12 @@ import {
 } from "./SplatGenerator";
 import type { SplatFileType } from "./SplatLoader";
 import type { SplatSkinning } from "./SplatSkinning";
-import { LN_SCALE_MAX, LN_SCALE_MIN } from "./defines";
+import {
+  EXT_LN_SCALE_MAX,
+  EXT_LN_SCALE_MIN,
+  LN_SCALE_MAX,
+  LN_SCALE_MIN,
+} from "./defines";
 import {
   DynoFloat,
   DynoUsampler2DArray,
@@ -160,6 +165,9 @@ export class SplatMesh extends SplatGenerator {
   // Maximum Spherical Harmonics level to use. Call updateGenerator()
   // after changing. (default: 3)
   maxSh = 3;
+
+  // Minimum opacity for raycast. (default: 0.1)
+  minRaycastOpacity = 0.1;
 
   constructor(options: SplatMeshOptions = {}) {
     const transform = new SplatTransformer();
@@ -565,6 +573,17 @@ export class SplatMesh extends SplatGenerator {
     const scale = (scales.x * scales.y * scales.z) ** (1.0 / 3.0);
 
     const RAYCAST_ELLIPSOID = true;
+    const lnScaleMin =
+      this.packedSplats.splatEncoding?.lnScaleMin ??
+      (this.packedSplats.splatEncoding?.extended
+        ? EXT_LN_SCALE_MIN
+        : LN_SCALE_MIN);
+    const lnScaleMax =
+      this.packedSplats.splatEncoding?.lnScaleMax ??
+      (this.packedSplats.splatEncoding?.extended
+        ? EXT_LN_SCALE_MAX
+        : LN_SCALE_MAX);
+
     const distances = raycast_splats(
       origin.x,
       origin.y,
@@ -582,8 +601,9 @@ export class SplatMesh extends SplatGenerator {
         ? this.packedSplats.packedArray[1]
         : undefined,
       RAYCAST_ELLIPSOID,
-      this.packedSplats.splatEncoding?.lnScaleMin ?? LN_SCALE_MIN,
-      this.packedSplats.splatEncoding?.lnScaleMax ?? LN_SCALE_MAX,
+      lnScaleMin,
+      lnScaleMax,
+      this.minRaycastOpacity,
     );
 
     for (const distance of distances) {
