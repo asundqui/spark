@@ -446,9 +446,6 @@ export function setPackedSplat(
     lnScaleMax?: number;
   },
 ) {
-  if (index === 0) {
-    console.log("setPackedSplat", encoding, Array.isArray(packedSplats));
-  }
   const i4 = index * 4;
   if (!Array.isArray(packedSplats)) {
     const rgbMin = encoding?.rgbMin ?? 0.0;
@@ -551,6 +548,28 @@ export function setPackedSplatScales(
       encoding,
     );
   }
+}
+
+export function setPackedSplatLods(
+  packedSplats: Uint32Array | Uint32Array[],
+  index: number,
+  lodMin: number,
+  lodLow: number,
+  lodHigh: number,
+  lodMax: number,
+  encoding?: {
+    lnScaleMin?: number;
+    lnScaleMax?: number;
+  },
+) {
+  const i4 = index * 4;
+  if (!Array.isArray(packedSplats)) {
+    throw new Error(
+      "setPackedSplatLods not implemented for non-extended splats",
+    );
+  }
+  const [_p0, p1] = packedSplats;
+  encodeLod9(p1, i4 + 2, lodMin, lodLow, lodHigh, lodMax, encoding);
 }
 
 export function setPackedSplatExtra(
@@ -1190,6 +1209,66 @@ function encodeScaleLod9(
     (uLodMin >>> 5) | (uLodLow << 4) | (uLodHigh << 13) | (uLodMax << 22);
 }
 
+function encodeLod9(
+  array: Uint32Array,
+  offset: number,
+  lodMin: number,
+  lodLow: number,
+  lodHigh: number,
+  lodMax: number,
+  encoding?: {
+    lnScaleMin?: number;
+    lnScaleMax?: number;
+  },
+) {
+  const lnScaleMin = encoding?.lnScaleMin ?? EXT_LN_SCALE_MIN;
+  const lnScaleMax = encoding?.lnScaleMax ?? EXT_LN_SCALE_MAX;
+  const lnScaleScale = 510.0 / (lnScaleMax - lnScaleMin);
+  const uLodMin =
+    lodMin < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodMin) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uLodLow =
+    lodLow < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodLow) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uLodHigh =
+    lodHigh < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodHigh) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  const uLodMax =
+    lodMax < SCALE_ZERO
+      ? 0
+      : Math.min(
+          511,
+          Math.max(
+            1,
+            Math.round((Math.log(lodMax) - lnScaleMin) * lnScaleScale) + 1,
+          ),
+        );
+  array[offset] = (array[offset] & 0x07ffffff) | ((uLodMin & 0x1f) << 27);
+  array[offset + 1] =
+    (uLodMin >>> 5) | (uLodLow << 4) | (uLodHigh << 13) | (uLodMax << 22);
+}
+
 function decodeScaleLod9(
   array: Uint32Array,
   offset: number,
@@ -1204,7 +1283,7 @@ function decodeScaleLod9(
   const u1 = array[offset + 1];
   const lnScaleMin = encoding?.lnScaleMin ?? EXT_LN_SCALE_MIN;
   const lnScaleMax = encoding?.lnScaleMax ?? EXT_LN_SCALE_MAX;
-  const lnScaleScale = 510.0 / (lnScaleMax - lnScaleMin);
+  const lnScaleScale = (lnScaleMax - lnScaleMin) / 510.0;
   const uScalesX = u0 & 0x1ff;
   scales.x =
     uScalesX === 0 ? 0.0 : Math.exp(lnScaleMin + (uScalesX - 1) * lnScaleScale);

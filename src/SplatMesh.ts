@@ -1,11 +1,7 @@
 import * as THREE from "three";
 
 import init_wasm, { raycast_splats } from "spark-internal-rs";
-import {
-  DEFAULT_SPLAT_ENCODING,
-  PackedSplats,
-  type SplatEncoding,
-} from "./PackedSplats";
+import { PackedSplats, type SplatEncoding } from "./PackedSplats";
 import { type RgbaArray, readRgbaArray } from "./RgbaArray";
 import { SplatEdit, SplatEditSdf, SplatEdits } from "./SplatEdit";
 import {
@@ -30,10 +26,12 @@ import {
   add,
   combineGsplat,
   defineGsplat,
+  dot,
   dyno,
   dynoBlock,
   dynoConst,
   extendVec,
+  max,
   mul,
   normalize,
   readPackedSplat,
@@ -101,6 +99,7 @@ export type SplatMeshContext = {
   viewToWorld: SplatTransformer;
   worldToView: SplatTransformer;
   viewToObject: SplatTransformer;
+  pixelScale: DynoFloat;
   recolor: DynoVec4<THREE.Vector4>;
   time: DynoFloat;
   deltaTime: DynoFloat;
@@ -169,11 +168,17 @@ export class SplatMesh extends SplatGenerator {
   // Minimum opacity for raycast. (default: 0.1)
   minRaycastOpacity = 0.1;
 
+  // Set to true to enable LoD modulation. (default: false)
+  enableLod = false;
+  // LoD scale adjustment factor (default: 1.0)
+  lodScale = 1.0;
+
   constructor(options: SplatMeshOptions = {}) {
     const transform = new SplatTransformer();
     const viewToWorld = new SplatTransformer();
     const worldToView = new SplatTransformer();
     const viewToObject = new SplatTransformer();
+    const pixelScale = new DynoFloat({ value: 0 });
     const recolor = new DynoVec4({
       value: new THREE.Vector4(
         Number.NEGATIVE_INFINITY,
@@ -189,14 +194,15 @@ export class SplatMesh extends SplatGenerator {
       viewToWorld,
       worldToView,
       viewToObject,
+      pixelScale,
       recolor,
       time,
       deltaTime,
     };
 
     super({
-      update: ({ time, deltaTime, viewToWorld, globalEdits }) =>
-        this.update({ time, deltaTime, viewToWorld, globalEdits }),
+      update: ({ time, deltaTime, viewToWorld, pixelScale, globalEdits }) =>
+        this.update({ time, deltaTime, viewToWorld, pixelScale, globalEdits }),
     });
 
     this.packedSplats =
@@ -283,6 +289,32 @@ export class SplatMesh extends SplatGenerator {
     SplatMesh.isStaticInitialized = true;
   }
 
+  getSplat(index: number) {
+    return this.packedSplats.getSplat(index);
+  }
+
+  setSplat(
+    index: number,
+    center: THREE.Vector3,
+    scales: THREE.Vector3,
+    quaternion: THREE.Quaternion,
+    opacity: number,
+    color: THREE.Color,
+    extra?: THREE.Vector2,
+    lods?: THREE.Vector4,
+  ) {
+    this.packedSplats.setSplat(
+      index,
+      center,
+      scales,
+      quaternion,
+      opacity,
+      color,
+      extra,
+      lods,
+    );
+  }
+
   // Creates a new Gsplat with the provided parameters (all values in "float" space,
   // i.e. 0-1 for opacity and color) and adds it to the end of the packedSplats,
   // increasing numSplats by 1. If necessary, reallocates the buffer with an exponential
@@ -294,8 +326,18 @@ export class SplatMesh extends SplatGenerator {
     quaternion: THREE.Quaternion,
     opacity: number,
     color: THREE.Color,
+    extra?: THREE.Vector2,
+    lods?: THREE.Vector4,
   ) {
-    this.packedSplats.pushSplat(center, scales, quaternion, opacity, color);
+    this.packedSplats.pushSplat(
+      center,
+      scales,
+      quaternion,
+      opacity,
+      color,
+      extra,
+      lods,
+    );
   }
 
   // This method iterates over all Gsplats in this instance's packedSplats,
@@ -315,6 +357,8 @@ export class SplatMesh extends SplatGenerator {
       quaternion: THREE.Quaternion,
       opacity: number,
       color: THREE.Color,
+      extra: THREE.Vector2,
+      lods: THREE.Vector4,
     ) => void,
   ) {
     this.packedSplats.forEachSplat(callback);
@@ -327,7 +371,9 @@ export class SplatMesh extends SplatGenerator {
   }
 
   constructGenerator(context: SplatMeshContext) {
-    const { transform, viewToObject, recolor } = context;
+    const { transform, viewToObject, pixelScale, recolor } = context;
+    const enableLod =
+      this.enableLod && (this.packedSplats.splatEncoding?.extended ?? false);
     const generator = dynoBlock(
       { index: "int" },
       { gsplat: Gsplat },
@@ -337,28 +383,29 @@ export class SplatMesh extends SplatGenerator {
         }
         // Read a Gsplat from the PackedSplats template
         let gsplat = readPackedSplat(this.packedSplats.dyno, index);
+        const { center } = splitGsplat(gsplat).outputs;
+
+        // Calculate view direction in object space
+        const viewCenterInObject = viewToObject.translate;
+        const viewDelta = sub(center, viewCenterInObject);
+
+        if (enableLod) {
+          const { lods, opacity } = splitGsplat(gsplat).outputs;
+          const negZ = dynoConst("vec3", new THREE.Vector3(0, 0, -1));
+          const zVec = viewToObject.applyDir(negZ);
+          const zDot = max(dot(viewDelta, zVec), dynoConst("float", 0.0));
+          const pixelSize = mul(pixelScale, zDot);
+          const modulate = modulateLod(pixelSize, lods);
+          gsplat = combineGsplat({ gsplat, opacity: mul(opacity, modulate) });
+        }
 
         if (this.maxSh >= 1) {
           // Inject lighting from SH1..SH3
           const { sh1Texture, sh2Texture, sh3Texture } =
             this.ensureShTextures();
           if (sh1Texture) {
-            //Calculate view direction in object space
-            const viewCenterInObject = viewToObject.translate;
-            const { center } = splitGsplat(gsplat).outputs;
-            const viewDir = normalize(sub(center, viewCenterInObject));
-
-            function rescaleSh(
-              sNorm: DynoVal<"vec3">,
-              minMax: DynoVal<"vec2">,
-            ) {
-              const { x: min, y: max } = split(minMax).outputs;
-              const mid = mul(add(min, max), dynoConst("float", 0.5));
-              const scale = mul(sub(max, min), dynoConst("float", 0.5));
-              return add(mid, mul(sNorm, scale));
-            }
-
             // Evaluate Spherical Harmonics
+            const viewDir = normalize(viewDelta);
             const sh1Snorm = evaluateSH1(gsplat, sh1Texture, viewDir);
             let rgb = rescaleSh(sh1Snorm, this.packedSplats.dynoSh1MinMax);
             if (this.maxSh >= 2 && sh2Texture) {
@@ -441,11 +488,13 @@ export class SplatMesh extends SplatGenerator {
   update({
     time,
     viewToWorld,
+    pixelScale,
     deltaTime,
     globalEdits,
   }: {
     time: number;
     viewToWorld: THREE.Matrix4;
+    pixelScale?: number;
     deltaTime: number;
     globalEdits: SplatEdit[];
   }) {
@@ -480,10 +529,18 @@ export class SplatMesh extends SplatGenerator {
     const viewToObjectMatrix = worldToObject.multiply(viewToWorld);
     if (
       viewToObject.updateFromMatrix(viewToObjectMatrix) &&
-      (this.enableViewToObject || this.packedSplats.extra.sh1)
+      (this.enableViewToObject || this.packedSplats.extra.sh1 || this.enableLod)
     ) {
       // Only trigger update if we have view-dependent spherical harmonics
       updated = true;
+    }
+
+    if (this.enableLod) {
+      const adjustedScale = pixelScale ? pixelScale * this.lodScale : 0.0;
+      if (this.context.pixelScale.value !== adjustedScale) {
+        this.context.pixelScale.value = adjustedScale;
+        updated = true;
+      }
     }
 
     const newRecolor = new THREE.Vector4(
@@ -725,6 +782,13 @@ export class SplatMesh extends SplatGenerator {
   }
 }
 
+function rescaleSh(sNorm: DynoVal<"vec3">, minMax: DynoVal<"vec2">) {
+  const { x: min, y: max } = split(minMax).outputs;
+  const mid = mul(add(min, max), dynoConst("float", 0.5));
+  const scale = mul(sub(max, min), dynoConst("float", 0.5));
+  return add(mid, mul(sNorm, scale));
+}
+
 const defineEvaluateSH1 = unindent(`
   vec3 evaluateSH1(Gsplat gsplat, usampler2DArray sh1, vec3 viewDir) {
     // Extract sint7 values packed into 2 x uint32
@@ -909,4 +973,43 @@ export function evaluateSH3(
         }
       `),
   }).outputs.rgb;
+}
+
+const defineModulateLod = unindent(`
+  float modulateLod(float pixelSize, vec4 lods) {
+    if (pixelSize <= 0.0) {
+      return 1.0;
+    }
+    if ((lods.w > 0.0) && (pixelSize >= lods.w)) {
+      return 0.0;
+    }
+    if (pixelSize <= lods.x) {
+      return 0.0;
+    }
+    if ((lods.z > 0.0) && (pixelSize > lods.z)) {
+      vec2 logs = log(lods.wz);
+      return (log(pixelSize) - logs.x) / (logs.y - logs.x);
+    }
+    if (pixelSize < lods.y) {
+      vec2 logs = log(lods.xy);
+      return (log(pixelSize) - logs.x) / (logs.y - logs.x);
+    }
+    return 1.0;
+  }
+`);
+
+export function modulateLod(
+  pixelSize: DynoVal<"float">,
+  lods: DynoVal<"vec4">,
+): DynoVal<"float"> {
+  return dyno({
+    inTypes: { pixelSize: "float", lods: "vec4" },
+    outTypes: { modulate: "float" },
+    inputs: { pixelSize, lods },
+    globals: () => [defineModulateLod],
+    statements: ({ inputs, outputs }) =>
+      unindentLines(`
+        ${outputs.modulate} = modulateLod(${inputs.pixelSize}, ${inputs.lods});
+      `),
+  }).outputs.modulate;
 }

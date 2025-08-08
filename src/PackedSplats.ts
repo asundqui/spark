@@ -28,6 +28,8 @@ import {
   computeMaxSplats,
   getTextureSize,
   setPackedSplat,
+  setPackedSplatExtra,
+  setPackedSplatLods,
   threeMrtArray,
   unpackSplat,
 } from "./utils";
@@ -412,6 +414,8 @@ export class PackedSplats {
     quaternion: THREE.Quaternion,
     opacity: number,
     color: THREE.Color,
+    extra?: THREE.Vector2,
+    lods?: THREE.Vector4,
   ) {
     const packedSplats = this.ensureSplats(index + 1);
     setPackedSplat(
@@ -431,7 +435,22 @@ export class PackedSplats {
       color.r,
       color.g,
       color.b,
+      this.splatEncoding,
     );
+    if (extra) {
+      setPackedSplatExtra(packedSplats, index, extra.x, extra.y);
+    }
+    if (lods) {
+      setPackedSplatLods(
+        packedSplats,
+        index,
+        lods.x,
+        lods.y,
+        lods.z,
+        lods.w,
+        this.splatEncoding,
+      );
+    }
     this.numSplats = Math.max(this.numSplats, index + 1);
   }
 
@@ -443,6 +462,8 @@ export class PackedSplats {
     quaternion: THREE.Quaternion,
     opacity: number,
     color: THREE.Color,
+    extra?: THREE.Vector2,
+    lods?: THREE.Vector4,
   ) {
     const packedSplats = this.ensureSplats(this.numSplats + 1);
     setPackedSplat(
@@ -462,7 +483,22 @@ export class PackedSplats {
       color.r,
       color.g,
       color.b,
+      this.splatEncoding,
     );
+    if (extra) {
+      setPackedSplatExtra(packedSplats, this.numSplats, extra.x, extra.y);
+    }
+    if (lods) {
+      setPackedSplatLods(
+        packedSplats,
+        this.numSplats,
+        lods.x,
+        lods.y,
+        lods.z,
+        lods.w,
+        this.splatEncoding,
+      );
+    }
     ++this.numSplats;
   }
 
@@ -476,6 +512,8 @@ export class PackedSplats {
       quaternion: THREE.Quaternion,
       opacity: number,
       color: THREE.Color,
+      extra: THREE.Vector2,
+      lods: THREE.Vector4,
     ) => void,
   ) {
     if (!this.packedArray || !this.numSplats) {
@@ -490,6 +528,8 @@ export class PackedSplats {
         unpacked.quaternion,
         unpacked.opacity,
         unpacked.color,
+        unpacked.extra,
+        unpacked.lods,
       );
     }
   }

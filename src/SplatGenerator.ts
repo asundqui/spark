@@ -170,12 +170,14 @@ export class SplatGenerator extends THREE.Object3D {
     time,
     deltaTime,
     viewToWorld,
+    pixelScale,
     globalEdits,
   }: {
     object: SplatGenerator;
     time: number;
     deltaTime: number;
     viewToWorld: THREE.Matrix4;
+    pixelScale?: number;
     globalEdits: SplatEdit[];
   }) => void;
   version: number;
@@ -198,12 +200,14 @@ export class SplatGenerator extends THREE.Object3D {
       time,
       deltaTime,
       viewToWorld,
+      pixelScale,
       globalEdits,
     }: {
       object: SplatGenerator;
       time: number;
       deltaTime: number;
       viewToWorld: THREE.Matrix4;
+      pixelScale?: number;
       globalEdits: SplatEdit[];
     }) => void;
   }) {

@@ -117,11 +117,11 @@ export class SplatLoader extends Loader {
         await Promise.all(promises);
         if (onLoad) {
           const splatEncoding =
-            (this.splatEncoding ??
+            this.splatEncoding ??
             this.packedSplats?.splatEncoding ??
-            PackedSplats.defaultExtended)
+            (PackedSplats.defaultExtended
               ? { ...DEFAULT_EXT_SPLAT_ENCODING }
-              : { ...DEFAULT_SPLAT_ENCODING };
+              : { ...DEFAULT_SPLAT_ENCODING });
           const decoded = await unpackSplats({
             input,
             extraFiles,

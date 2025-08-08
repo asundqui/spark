@@ -526,11 +526,39 @@ export class SparkRenderer extends THREE.Mesh {
     const isNewFrame = frame !== this.lastFrame;
     this.lastFrame = frame;
 
-    const time = this.getTime(frame);
-    const deltaTime = time - (this.viewpoint.lastTime ?? time);
-    this.viewpoint.lastTime = time;
-
     const viewpoint = this.viewpoint;
+    const time = this.getTime(frame);
+    const deltaTime = time - (viewpoint.lastTime ?? time);
+    viewpoint.lastTime = time;
+
+    if (viewpoint.target) {
+      // Rendering to a texture target, so get its dimensions
+      this.uniforms.renderSize.value.set(
+        viewpoint.target.width,
+        viewpoint.target.height,
+      );
+    } else {
+      // Rendering to the canvas or WebXR
+      const renderSize = renderer.getDrawingBufferSize(
+        this.uniforms.renderSize.value,
+      );
+      if (renderSize.x === 1 && renderSize.y === 1) {
+        // WebXR mode on Apple Vision Pro returns 1x1 when presenting.
+        // Use a different means to figure out the render size.
+        const baseLayer = renderer.xr.getSession()?.renderState.baseLayer;
+        if (baseLayer) {
+          renderSize.x = baseLayer.framebufferWidth;
+          renderSize.y = baseLayer.framebufferHeight;
+        }
+      }
+    }
+
+    const pixelScale =
+      camera instanceof THREE.PerspectiveCamera
+        ? (2.0 * Math.tan((0.5 * camera.fov * Math.PI) / 180.0)) /
+          this.uniforms.renderSize.value.y
+        : 0.0;
+
     if (viewpoint === this.defaultView) {
       // When rendering is triggered on the default viewpoint,
       // perform automatic updates.
@@ -550,7 +578,11 @@ export class SparkRenderer extends THREE.Mesh {
       }
 
       if (this.autoUpdate) {
-        this.update({ scene, viewToWorld: this.defaultView.viewToWorld });
+        this.update({
+          scene,
+          viewToWorld: this.defaultView.viewToWorld,
+          pixelScale,
+        });
       }
     }
 
@@ -570,28 +602,6 @@ export class SparkRenderer extends THREE.Mesh {
       if (viewpoint.display && viewpoint.stochastic) {
         (this.geometry as SplatGeometry).instanceCount =
           this.uniforms.numSplats.value;
-      }
-    }
-
-    if (viewpoint.target) {
-      // Rendering to a texture target, so its dimensions
-      this.uniforms.renderSize.value.set(
-        viewpoint.target.width,
-        viewpoint.target.height,
-      );
-    } else {
-      // Rendering to the canvas or WebXR
-      const renderSize = renderer.getDrawingBufferSize(
-        this.uniforms.renderSize.value,
-      );
-      if (renderSize.x === 1 && renderSize.y === 1) {
-        // WebXR mode on Apple Vision Pro returns 1x1 when presenting.
-        // Use a different means to figure out the render size.
-        const baseLayer = renderer.xr.getSession()?.renderState.baseLayer;
-        if (baseLayer) {
-          renderSize.x = baseLayer.framebufferWidth;
-          renderSize.y = baseLayer.framebufferHeight;
-        }
       }
     }
 
@@ -710,13 +720,14 @@ export class SparkRenderer extends THREE.Mesh {
   update({
     scene,
     viewToWorld,
-  }: { scene: THREE.Scene; viewToWorld?: THREE.Matrix4 }) {
+    pixelScale,
+  }: { scene: THREE.Scene; viewToWorld?: THREE.Matrix4; pixelScale?: number }) {
     // Compute the transform for the SparkRenderer to use as origin
     // for Gsplat generation and accumulation.
     const originToWorld = this.matrixWorld.clone();
     // Either do the update now, or in the next "tick" depending on preUpdate
     if (this.preUpdate) {
-      this.updateInternal({ scene, originToWorld, viewToWorld });
+      this.updateInternal({ scene, originToWorld, viewToWorld, pixelScale });
     } else {
       // Pass the update parameters to be performed on the next tick
       this.pendingUpdate = {
@@ -727,7 +738,12 @@ export class SparkRenderer extends THREE.Mesh {
         if (this.pendingUpdate) {
           const { scene, originToWorld } = this.pendingUpdate;
           this.pendingUpdate = null;
-          this.updateInternal({ scene, originToWorld, viewToWorld });
+          this.updateInternal({
+            scene,
+            originToWorld,
+            viewToWorld,
+            pixelScale,
+          });
         }
       }, 1);
     }
@@ -737,10 +753,12 @@ export class SparkRenderer extends THREE.Mesh {
     scene,
     originToWorld,
     viewToWorld,
+    pixelScale,
   }: {
     scene: THREE.Scene;
     originToWorld?: THREE.Matrix4;
     viewToWorld?: THREE.Matrix4;
+    pixelScale?: number;
   }): boolean {
     if (!this.canAllocAccumulator()) {
       // We don't have any available accumulators because of sorting
@@ -776,6 +794,7 @@ export class SparkRenderer extends THREE.Mesh {
         time,
         deltaTime,
         viewToWorld,
+        pixelScale,
         globalEdits,
       });
     }
