@@ -3,7 +3,8 @@ import * as THREE from "three";
 import { DynoPackedSplats } from "./PackedSplats";
 import { Readback } from "./Readback";
 import type { SparkRenderer } from "./SparkRenderer";
-import type { SplatAccumulator } from "./SplatAccumulator";
+import type { GeneratorMapping, SplatAccumulator } from "./SplatAccumulator";
+import type { SplatGenerator } from "./SplatGenerator";
 import { SplatGeometry } from "./SplatGeometry";
 import {
   type DynoBlock,
@@ -167,6 +168,7 @@ export class SparkViewpoint {
     accumulator: SplatAccumulator;
     viewToWorld: THREE.Matrix4;
     geometry: SplatGeometry;
+    mapping: GeneratorMapping[];
   } | null = null;
 
   private sorting: { viewToWorld: THREE.Matrix4 } | null = null;
@@ -226,7 +228,7 @@ export class SparkViewpoint {
     this.sort32 = options.sort32;
     this.stochastic = options.stochastic ?? false;
 
-    this.orderingFreelist = new FreeList({
+    this.orderingFreelist = new FreeList<Uint32Array, number>({
       allocate: (maxSplats) => new Uint32Array(maxSplats),
       valid: (ordering, maxSplats) => ordering.length === maxSplats,
     });
@@ -475,11 +477,13 @@ export class SparkViewpoint {
     } else if (accumulator) {
       needsSort = true;
       const { mappingVersion } = this.display.accumulator;
-      if (accumulator.mappingVersion === mappingVersion) {
+      const updateImmediately =
+        accumulator.mappingVersion === mappingVersion || true;
+      if (updateImmediately) {
         // Splat mapping has not changed, so reuse the existing sorted
         // geometry to show updates faster. We will still fire off
         // a re-sort if necessary. First release old accumulator.
-        this.spark.releaseAccumulator(this.display.accumulator);
+        // this.spark.releaseAccumulator(this.display.accumulator);
         this.display.accumulator = accumulator;
         displayed = true;
       }
@@ -635,6 +639,10 @@ export class SparkViewpoint {
         ordering: Uint32Array;
         activeSplats: number;
       };
+
+      // // Add delay to sort
+      // await new Promise(resolve => setTimeout(resolve, 1000));
+
       if (sort32) {
         this.readback32 = result.readback as Uint32Array;
       } else {
@@ -672,14 +680,27 @@ export class SparkViewpoint {
         accumulator,
         viewToWorld,
         geometry: new SplatGeometry(ordering, activeSplats),
+        mapping: accumulator.mapping,
       };
     } else {
-      if (!displayed && accumulator !== this.display.accumulator) {
-        this.spark.releaseAccumulator(this.display.accumulator);
-        this.display.accumulator = accumulator;
-      }
+      // if (!displayed && accumulator !== this.display.accumulator) {
+      this.spark.releaseAccumulator(this.display.accumulator);
+      //   this.display.accumulator = accumulator;
+      // }
 
       this.display.viewToWorld = viewToWorld;
+
+      const displayMapping = new Map<SplatGenerator, GeneratorMapping>();
+      for (const mapping of this.display.mapping) {
+        displayMapping.set(mapping.node, mapping);
+      }
+      for (const mapping of accumulator.mapping) {
+        const oldCount = displayMapping.get(mapping.node)?.count ?? 0;
+        if (oldCount !== mapping.count) {
+          mapping.node.updateVersion();
+        }
+      }
+      this.display.mapping = accumulator.mapping;
 
       const oldOrdering = this.display.geometry.ordering;
       if (oldOrdering.length === ordering.length) {
@@ -739,12 +760,12 @@ export class SparkViewpoint {
           const index2 = mul(index, dynoConst("int", 2));
 
           const gsplat0 = readPackedSplat(dynoSplats, index2);
-          const metric0 = computeSortMetric({ gsplat: gsplat0, ...sortParams });
-
           const gsplat1 = readPackedSplat(
             dynoSplats,
             add(index2, dynoConst("int", 1)),
           );
+
+          const metric0 = computeSortMetric({ gsplat: gsplat0, ...sortParams });
           const metric1 = computeSortMetric({ gsplat: gsplat1, ...sortParams });
 
           const combined = combine({

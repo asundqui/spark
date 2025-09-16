@@ -3,6 +3,7 @@ import * as THREE from "three";
 import init_wasm, { raycast_splats } from "spark-internal-rs";
 import { PackedSplats, type SplatEncoding } from "./PackedSplats";
 import { type RgbaArray, readRgbaArray } from "./RgbaArray";
+import type { GeneratorState } from "./SplatAccumulator";
 import { SplatEdit, SplatEditSdf, SplatEdits } from "./SplatEdit";
 import {
   type GsplatModifier,
@@ -31,9 +32,11 @@ import {
   dynoBlock,
   dynoConst,
   extendVec,
+  length,
   max,
   mul,
   normalize,
+  pow,
   readPackedSplat,
   split,
   splitGsplat,
@@ -94,12 +97,19 @@ export type SplatMeshOptions = {
   splatEncoding?: SplatEncoding;
 };
 
+export type LodMeta = {
+  cuts: [number, number][];
+  boundCenter: THREE.Vector3;
+  boundRadius: number;
+};
+
 export type SplatMeshContext = {
   transform: SplatTransformer;
   viewToWorld: SplatTransformer;
   worldToView: SplatTransformer;
   viewToObject: SplatTransformer;
   pixelScale: DynoFloat;
+  minPixelSize: DynoFloat;
   recolor: DynoVec4<THREE.Vector4>;
   time: DynoFloat;
   deltaTime: DynoFloat;
@@ -172,6 +182,8 @@ export class SplatMesh extends SplatGenerator {
   enableLod = false;
   // LoD scale adjustment factor (default: 1.0)
   lodScale = 1.0;
+  // LoD tree and bounding metadata
+  lodMeta: LodMeta | null = null;
 
   constructor(options: SplatMeshOptions = {}) {
     const transform = new SplatTransformer();
@@ -179,6 +191,7 @@ export class SplatMesh extends SplatGenerator {
     const worldToView = new SplatTransformer();
     const viewToObject = new SplatTransformer();
     const pixelScale = new DynoFloat({ value: 0 });
+    const minPixelSize = new DynoFloat({ value: 0 });
     const recolor = new DynoVec4({
       value: new THREE.Vector4(
         Number.NEGATIVE_INFINITY,
@@ -195,14 +208,35 @@ export class SplatMesh extends SplatGenerator {
       worldToView,
       viewToObject,
       pixelScale,
+      minPixelSize,
       recolor,
       time,
       deltaTime,
     };
 
     super({
-      update: ({ time, deltaTime, viewToWorld, pixelScale, globalEdits }) =>
-        this.update({ time, deltaTime, viewToWorld, pixelScale, globalEdits }),
+      update: ({
+        time,
+        deltaTime,
+        viewToWorld,
+        camera,
+        renderSize,
+        globalEdits,
+        sortState,
+        lastState,
+        newState,
+      }) =>
+        this.update({
+          time,
+          deltaTime,
+          viewToWorld,
+          camera,
+          renderSize,
+          globalEdits,
+          sortState,
+          lastState,
+          newState,
+        }),
     });
 
     this.packedSplats =
@@ -371,7 +405,8 @@ export class SplatMesh extends SplatGenerator {
   }
 
   constructGenerator(context: SplatMeshContext) {
-    const { transform, viewToObject, pixelScale, recolor } = context;
+    const { transform, viewToObject, pixelScale, minPixelSize, recolor } =
+      context;
     const enableLod =
       this.enableLod && (this.packedSplats.splatEncoding?.extended ?? false);
     const generator = dynoBlock(
@@ -391,12 +426,17 @@ export class SplatMesh extends SplatGenerator {
 
         if (enableLod) {
           const { lods, opacity } = splitGsplat(gsplat).outputs;
-          const negZ = dynoConst("vec3", new THREE.Vector3(0, 0, -1));
-          const zVec = viewToObject.applyDir(negZ);
-          const zDot = max(dot(viewDelta, zVec), dynoConst("float", 0.0));
-          const pixelSize = mul(pixelScale, zDot);
-          const modulate = modulateLod(pixelSize, lods);
+          // const negZ = dynoConst("vec3", new THREE.Vector3(0, 0, -1));
+          // const zVec = viewToObject.applyDir(negZ);
+          // const zDot = max(dot(viewDelta, zVec), dynoConst("float", 0.0));
+          // const zAlt = pow(zDot, dynoConst("float", 2.0));
+          // const zAlt = zDot;
+          const zAlt = length(viewCenterInObject);
+          const pixelSize = mul(pixelScale, zAlt);
+          const adjustedPixelSize = max(pixelSize, minPixelSize);
+          const modulate = modulateLod(adjustedPixelSize, lods);
           gsplat = combineGsplat({ gsplat, opacity: mul(opacity, modulate) });
+          console.log("*** enableLod");
         }
 
         if (this.maxSh >= 1) {
@@ -487,18 +527,25 @@ export class SplatMesh extends SplatGenerator {
   // updateGenerator() if the pipeline needs to change.
   update({
     time,
-    viewToWorld,
-    pixelScale,
     deltaTime,
+    viewToWorld,
+    camera,
+    renderSize,
     globalEdits,
+    sortState,
+    lastState,
+    newState,
   }: {
     time: number;
-    viewToWorld: THREE.Matrix4;
-    pixelScale?: number;
     deltaTime: number;
+    viewToWorld: THREE.Matrix4;
+    camera?: THREE.Camera;
+    renderSize?: THREE.Vector2;
     globalEdits: SplatEdit[];
+    sortState?: GeneratorState;
+    lastState?: GeneratorState;
+    newState?: GeneratorState;
   }) {
-    this.numSplats = this.packedSplats.numSplats;
     this.context.time.value = time;
     this.context.deltaTime.value = deltaTime;
     SplatMesh.dynoTime.value = time;
@@ -506,17 +553,11 @@ export class SplatMesh extends SplatGenerator {
     const { transform, viewToObject, recolor } = this.context;
     let updated = transform.update(this);
 
-    if (
-      this.context.viewToWorld.updateFromMatrix(viewToWorld) &&
-      this.enableViewToWorld
-    ) {
+    if (this.context.viewToWorld.updateFromMatrix(viewToWorld)) {
       updated = true;
     }
     const worldToView = viewToWorld.clone().invert();
-    if (
-      this.context.worldToView.updateFromMatrix(worldToView) &&
-      this.enableWorldToView
-    ) {
+    if (this.context.worldToView.updateFromMatrix(worldToView)) {
       updated = true;
     }
 
@@ -527,18 +568,71 @@ export class SplatMesh extends SplatGenerator {
     );
     const worldToObject = objectToWorld.invert();
     const viewToObjectMatrix = worldToObject.multiply(viewToWorld);
-    if (
-      viewToObject.updateFromMatrix(viewToObjectMatrix) &&
-      (this.enableViewToObject || this.packedSplats.extra.sh1 || this.enableLod)
-    ) {
-      // Only trigger update if we have view-dependent spherical harmonics
+    if (viewToObject.updateFromMatrix(viewToObjectMatrix)) {
       updated = true;
     }
 
     if (this.enableLod) {
-      const adjustedScale = pixelScale ? pixelScale * this.lodScale : 0.0;
+      let adjustedScale = 0.0;
+      if (renderSize) {
+        const pixelScale =
+          camera instanceof THREE.PerspectiveCamera
+            ? (2.0 * Math.tan((0.5 * camera.fov * Math.PI) / 180.0)) /
+              renderSize.y
+            : 0.0;
+        adjustedScale = pixelScale * this.lodScale;
+      }
+
       if (this.context.pixelScale.value !== adjustedScale) {
         this.context.pixelScale.value = adjustedScale;
+        updated = true;
+      }
+
+      if (this.lodMeta) {
+        const distance = viewToObject.translate.value.distanceTo(
+          this.lodMeta.boundCenter,
+        );
+        const closest = Math.max(0, distance - this.lodMeta.boundRadius);
+        const pixelSize = closest * adjustedScale;
+
+        let lo = 0;
+        let hi = this.lodMeta.cuts.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (this.lodMeta.cuts[mid][0] <= pixelSize) {
+            hi = mid;
+          } else {
+            lo = mid + 1;
+          }
+        }
+
+        const maxSplats =
+          lo < this.lodMeta.cuts.length
+            ? this.lodMeta.cuts[lo][1]
+            : this.packedSplats.numSplats;
+        let minPixelSize =
+          lo < this.lodMeta.cuts.length ? this.lodMeta.cuts[lo][0] : 0.0;
+
+        if (newState) {
+          (newState as { minPixelSize: number }).minPixelSize = minPixelSize;
+        }
+        const typedSortState = sortState as
+          | { minPixelSize?: number }
+          | undefined;
+        minPixelSize = Math.max(
+          minPixelSize,
+          typedSortState?.minPixelSize ?? Number.POSITIVE_INFINITY,
+        );
+        this.context.minPixelSize.value = minPixelSize;
+
+        if (this.numSplats !== maxSplats) {
+          this.numSplats = maxSplats;
+          updated = true;
+        }
+      }
+    } else {
+      if (this.numSplats !== this.packedSplats.numSplats) {
+        this.numSplats = this.packedSplats.numSplats;
         updated = true;
       }
     }
@@ -690,7 +784,7 @@ export class SplatMesh extends SplatGenerator {
       | DynoUsampler2DArray<"sh1", THREE.DataArrayTexture>
       | undefined;
     if (!sh1Texture) {
-      let sh1 = this.packedSplats.extra.sh1 as Uint32Array;
+      let sh1 = this.packedSplats.extra.sh1 as Uint32Array<ArrayBuffer>;
       const { width, height, depth, maxSplats } = getTextureSize(
         sh1.length / 2,
       );
@@ -722,7 +816,7 @@ export class SplatMesh extends SplatGenerator {
       | DynoUsampler2DArray<"sh2", THREE.DataArrayTexture>
       | undefined;
     if (!sh2Texture) {
-      let sh2 = this.packedSplats.extra.sh2 as Uint32Array;
+      let sh2 = this.packedSplats.extra.sh2 as Uint32Array<ArrayBuffer>;
       const { width, height, depth, maxSplats } = getTextureSize(
         sh2.length / 4,
       );
@@ -754,7 +848,7 @@ export class SplatMesh extends SplatGenerator {
       | DynoUsampler2DArray<"sh3", THREE.DataArrayTexture>
       | undefined;
     if (!sh3Texture) {
-      let sh3 = this.packedSplats.extra.sh3 as Uint32Array;
+      let sh3 = this.packedSplats.extra.sh3 as Uint32Array<ArrayBuffer>;
       const { width, height, depth, maxSplats } = getTextureSize(
         sh3.length / 4,
       );

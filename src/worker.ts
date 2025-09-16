@@ -15,6 +15,7 @@ import {
   getArrayBuffers,
   setPackedSplat,
   setPackedSplatCenter,
+  setPackedSplatLods,
   setPackedSplatOpacity,
   setPackedSplatQuat,
   setPackedSplatRgb,
@@ -382,6 +383,21 @@ async function unpackPly({
         encodeSh3Rgb(extra.sh3 as Uint32Array, index, sh3, splatEncoding);
       }
     },
+    splatEncoding.extended
+      ? {
+          lodCallback: (index, lodMin, lodLow, lodHigh, lodMax) => {
+            setPackedSplatLods(
+              packedArray,
+              index,
+              lodMin,
+              lodLow,
+              lodHigh,
+              lodMax,
+              splatEncoding,
+            );
+          },
+        }
+      : undefined,
   );
 
   return { packedArray, numSplats, extra };

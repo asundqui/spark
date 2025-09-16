@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "spark-internal-rs",
+    "splat-lod",
 ]
 resolver = "2"
 
@@ -11,8 +12,18 @@ license = "Proprietary"
 authors = ["World Labs Technologies"]
 repository = "https://github.com/sparkjs-dev/spark"
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [workspace.dependencies]
 anyhow = "1.0.98"
 half = "2.6.0"
 js-sys = "0.3.77"
+ordered-float = "5.0.0"
+smallvec = "1.15.1"
 wasm-bindgen = "0.2.100"
+flate2 = { version = "1.1.2", default-features = false, features = ["rust_backend"] }
+ahash = "0.8.12"
+serde_json = "1.0.143"
+serde = { version = "1.0.219", features = ["derive"] }

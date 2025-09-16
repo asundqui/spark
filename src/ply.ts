@@ -49,6 +49,15 @@ export type SplatShCallback = (
   sh3?: Float32Array,
 ) => void;
 
+// Callback for parseSplats Level-of-Detail data
+export type SplatLodCallback = (
+  index: number,
+  lodMin: number,
+  lodLow: number,
+  lodHigh: number,
+  lodMax: number,
+) => void;
+
 // A PlyReader is used to parse PLY files for Gsplat data.
 // It takes a Uint8Array/ArrayBuffer as input fileBytes, parses the text header,
 // and provides a method parseData to iterate over the entire binary data
@@ -249,7 +258,11 @@ export class PlyReader {
 
   // Parse all the Gsplat data in the PLY file in go, invoking the given
   // callbacks for each Gsplat.
-  parseSplats(splatCallback: SplatCallback, shCallback?: SplatShCallback) {
+  parseSplats(
+    splatCallback: SplatCallback,
+    shCallback?: SplatShCallback,
+    extraCallbacks?: { lodCallback?: SplatLodCallback },
+  ) {
     if (this.elements.vertex == null) {
       throw new Error("No vertex element found");
     }
@@ -546,6 +559,10 @@ export class PlyReader {
         green,
         blue,
         alpha,
+        lod_min,
+        lod_low,
+        lod_high,
+        lod_max,
       } = element.properties;
 
       if (!x || !y || !z) {
@@ -562,6 +579,11 @@ export class PlyReader {
 
       numSh = getNumSh(element.properties);
       prepareSh();
+
+      const lodCallback =
+        lod_min && lod_low && lod_high && lod_max
+          ? extraCallbacks?.lodCallback
+          : undefined;
 
       return (index: number, item: Record<string, number | number[]>) => {
         const scaleX = hasScales
@@ -639,6 +661,16 @@ export class PlyReader {
             }
           }
           shCallback(index, sh1, sh2, sh3);
+        }
+
+        if (lodCallback) {
+          lodCallback(
+            index,
+            item.lod_min as number,
+            item.lod_low as number,
+            item.lod_high as number,
+            item.lod_max as number,
+          );
         }
       };
     };

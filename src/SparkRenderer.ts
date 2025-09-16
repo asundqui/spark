@@ -45,47 +45,47 @@ import {
 // of 5 to avoid excessive memory usage.
 const MAX_ACCUMULATORS = 5;
 
-// Scene.onBeforeRender monkey-patch to
-// inject a SparkRenderer into a scene with SplatMeshes if there isn't
-// one already. Restore original Scene.onBeforeRenderer and Scene.add when done.
-let hasSplatMesh = false;
-let hasSparkRenderer = false;
+// // Scene.onBeforeRender monkey-patch to
+// // inject a SparkRenderer into a scene with SplatMeshes if there isn't
+// // one already. Restore original Scene.onBeforeRenderer and Scene.add when done.
+// let hasSplatMesh = false;
+// let hasSparkRenderer = false;
 
-let sparkRendererInstance: SparkRenderer;
+// let sparkRendererInstance: SparkRenderer;
 
-function containsSplatMesh(object3D: THREE.Object3D) {
-  let hasSplatMesh = false;
-  if (object3D instanceof SplatMesh) {
-    return true;
-  }
-  object3D.traverse((child: THREE.Object3D) => {
-    hasSplatMesh = hasSplatMesh || child instanceof SplatMesh;
-  });
-  return hasSplatMesh;
-}
+// function containsSplatMesh(object3D: THREE.Object3D) {
+//   let hasSplatMesh = false;
+//   if (object3D instanceof SplatMesh) {
+//     return true;
+//   }
+//   object3D.traverse((child: THREE.Object3D) => {
+//     hasSplatMesh = hasSplatMesh || child instanceof SplatMesh;
+//   });
+//   return hasSplatMesh;
+// }
 
-const sceneAdd = THREE.Scene.prototype.add;
-THREE.Scene.prototype.add = function (object: THREE.Object3D) {
-  hasSplatMesh = hasSplatMesh || containsSplatMesh(object);
-  hasSparkRenderer = hasSparkRenderer || object instanceof SparkRenderer;
-  sceneAdd.call(this, object);
-  return this;
-};
+// const sceneAdd = THREE.Scene.prototype.add;
+// THREE.Scene.prototype.add = function (object: THREE.Object3D) {
+//   hasSplatMesh = hasSplatMesh || containsSplatMesh(object);
+//   hasSparkRenderer = hasSparkRenderer || object instanceof SparkRenderer;
+//   sceneAdd.call(this, object);
+//   return this;
+// };
 
-const sceneOnBeforeRender = THREE.Scene.prototype.onBeforeRender;
-THREE.Scene.prototype.onBeforeRender = function (
-  renderer: THREE.WebGLRenderer,
-) {
-  if (!hasSplatMesh) {
-    return;
-  }
-  if (!hasSparkRenderer) {
-    const spark = sparkRendererInstance || new SparkRenderer({ renderer });
-    this.add(spark);
-  }
-  THREE.Scene.prototype.onBeforeRender = sceneOnBeforeRender;
-  THREE.Scene.prototype.add = sceneAdd;
-};
+// const sceneOnBeforeRender = THREE.Scene.prototype.onBeforeRender;
+// THREE.Scene.prototype.onBeforeRender = function (
+//   renderer: THREE.WebGLRenderer,
+// ) {
+//   if (!hasSplatMesh) {
+//     return;
+//   }
+//   if (!hasSparkRenderer) {
+//     const spark = sparkRendererInstance || new SparkRenderer({ renderer });
+//     this.add(spark);
+//   }
+//   THREE.Scene.prototype.onBeforeRender = sceneOnBeforeRender;
+//   THREE.Scene.prototype.add = sceneAdd;
+// };
 
 export type SparkRendererOptions = {
   /**
@@ -384,7 +384,7 @@ export class SparkRenderer extends THREE.Mesh {
 
     this.clock = options.clock ? cloneClock(options.clock) : new THREE.Clock();
 
-    sparkRendererInstance = this;
+    // sparkRendererInstance = this;
   }
 
   static makeUniforms() {
@@ -458,6 +458,8 @@ export class SparkRenderer extends THREE.Mesh {
       encodeLinear: { value: false },
       // Debug flag that alternates each frame
       debugFlag: { value: false },
+      numIndexMapping: { value: 0 },
+      indexMapping: { value: new Uint32Array(64 * 4) },
     };
     return uniforms;
   }
@@ -553,12 +555,6 @@ export class SparkRenderer extends THREE.Mesh {
       }
     }
 
-    const pixelScale =
-      camera instanceof THREE.PerspectiveCamera
-        ? (2.0 * Math.tan((0.5 * camera.fov * Math.PI) / 180.0)) /
-          this.uniforms.renderSize.value.y
-        : 0.0;
-
     if (viewpoint === this.defaultView) {
       // When rendering is triggered on the default viewpoint,
       // perform automatic updates.
@@ -581,7 +577,6 @@ export class SparkRenderer extends THREE.Mesh {
         this.update({
           scene,
           viewToWorld: this.defaultView.viewToWorld,
-          pixelScale,
         });
       }
     }
@@ -672,6 +667,39 @@ export class SparkRenderer extends THREE.Mesh {
       this.uniforms.renderToViewQuat.value,
       new THREE.Vector3(),
     );
+
+    if (!viewpoint.display) {
+      this.uniforms.numIndexMapping.value = 0;
+    } else {
+      const sortMapping = viewpoint.display.mapping;
+      const splatMapping = viewpoint.display.accumulator.mapping.reduce(
+        (map, record) => {
+          map.set(record.node, record);
+          return map;
+        },
+        new Map<SplatGenerator, GeneratorMapping>(),
+      );
+
+      this.uniforms.numIndexMapping.value = sortMapping.length;
+      for (let i = 0; i < sortMapping.length; i++) {
+        this.uniforms.indexMapping.value[4 * i + 0] = sortMapping[i].base;
+        this.uniforms.indexMapping.value[4 * i + 1] = sortMapping[i].count;
+        const mapped = splatMapping.get(sortMapping[i].node);
+        if (mapped) {
+          this.uniforms.indexMapping.value[4 * i + 2] = mapped.base;
+          this.uniforms.indexMapping.value[4 * i + 3] = mapped.count;
+        } else {
+          this.uniforms.indexMapping.value[4 * i + 2] = 0;
+          this.uniforms.indexMapping.value[4 * i + 3] = 0;
+        }
+      }
+
+      if (viewpoint.display.accumulator.mapping[0].version < 500) {
+        console.log(
+          `version ${sortMapping[0].version} | ${viewpoint.display.accumulator.mapping[0].version} | ${viewpoint.display.geometry.instanceCount}`,
+        );
+      }
+    }
   }
 
   // Update the uniforms for the given viewpoint.
@@ -683,7 +711,8 @@ export class SparkRenderer extends THREE.Mesh {
 
     if (this.viewpoint.display) {
       const { accumulator, geometry } = this.viewpoint.display;
-      this.uniforms.numSplats.value = accumulator.splats.numSplats;
+      this.uniforms.numSplats.value =
+        this.viewpoint.display.geometry.instanceCount;
       const textures = accumulator.splats.getTexture();
       this.uniforms.packedSplats.value = Array.isArray(textures)
         ? textures[0]
@@ -720,14 +749,13 @@ export class SparkRenderer extends THREE.Mesh {
   update({
     scene,
     viewToWorld,
-    pixelScale,
-  }: { scene: THREE.Scene; viewToWorld?: THREE.Matrix4; pixelScale?: number }) {
+  }: { scene: THREE.Scene; viewToWorld?: THREE.Matrix4 }) {
     // Compute the transform for the SparkRenderer to use as origin
     // for Gsplat generation and accumulation.
     const originToWorld = this.matrixWorld.clone();
     // Either do the update now, or in the next "tick" depending on preUpdate
     if (this.preUpdate) {
-      this.updateInternal({ scene, originToWorld, viewToWorld, pixelScale });
+      this.updateInternal({ scene, originToWorld, viewToWorld });
     } else {
       // Pass the update parameters to be performed on the next tick
       this.pendingUpdate = {
@@ -742,7 +770,6 @@ export class SparkRenderer extends THREE.Mesh {
             scene,
             originToWorld,
             viewToWorld,
-            pixelScale,
           });
         }
       }, 1);
@@ -753,12 +780,10 @@ export class SparkRenderer extends THREE.Mesh {
     scene,
     originToWorld,
     viewToWorld,
-    pixelScale,
   }: {
     scene: THREE.Scene;
     originToWorld?: THREE.Matrix4;
     viewToWorld?: THREE.Matrix4;
-    pixelScale?: number;
   }): boolean {
     if (!this.canAllocAccumulator()) {
       // We don't have any available accumulators because of sorting
@@ -787,6 +812,13 @@ export class SparkRenderer extends THREE.Mesh {
     const { generators, visibleGenerators, globalEdits } =
       this.compileScene(scene);
 
+    const displayMapping = new Map<SplatGenerator, GeneratorMapping>();
+    if (this.viewpoint.display) {
+      for (const mapping of this.viewpoint.display.mapping) {
+        displayMapping.set(mapping.node, mapping);
+      }
+    }
+
     // Let all SplatGenerators run their frameUpdate() method
     for (const object of generators) {
       object.frameUpdate?.({
@@ -794,7 +826,6 @@ export class SparkRenderer extends THREE.Mesh {
         time,
         deltaTime,
         viewToWorld,
-        pixelScale,
         globalEdits,
       });
     }

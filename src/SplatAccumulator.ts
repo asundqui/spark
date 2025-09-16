@@ -11,6 +11,8 @@ import type {
 // SplatGenerators, keeping track of the splat mapping, coordinate system,
 // and reference count.
 
+export type GeneratorState = object;
+
 // A GeneratorMapping describes a Gsplat range that was generated, including
 // which generator and its version number.
 export type GeneratorMapping = {
@@ -19,6 +21,7 @@ export type GeneratorMapping = {
   version: number;
   base: number;
   count: number;
+  state?: GeneratorState;
 };
 
 export class SplatAccumulator {

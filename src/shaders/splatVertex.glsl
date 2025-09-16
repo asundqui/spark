@@ -37,6 +37,9 @@ uniform usampler2DArray packedSplats2;
 uniform bool extended;
 uniform vec4 rgbMinMaxLnScaleMinMax;
 
+uniform uint numIndexMapping;
+uniform uvec4 indexMapping[64];
+
 void main() {
     // Default to outside the frustum so it's discarded if we return early
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
@@ -60,10 +63,32 @@ void main() {
             // Special value reserved for "no splat"
             return;
         }
+        if (numIndexMapping == 0u) {
+            return;
+        }
+
+        uint lo = 0u;
+        uint hi = numIndexMapping;
+        while ((lo + 1u) < hi) {
+            uint mid = (lo + hi) >> 1u;
+            bool below = (indexMapping[mid].x <= splatIndex);
+            lo = below ? mid : lo;
+            hi = below ? hi : mid;
+        }
+
+        if (splatIndex < indexMapping[lo].x) {
+            return;
+        }
+        uint newSplatIndex = splatIndex - indexMapping[lo].x;
+        if (newSplatIndex >= min(indexMapping[lo].y, indexMapping[lo].w)) {
+            return;
+        }
+        newSplatIndex += indexMapping[lo].z;
+
         texCoord = ivec3(
-            splatIndex & SPLAT_TEX_WIDTH_MASK,
-            (splatIndex >> SPLAT_TEX_WIDTH_BITS) & SPLAT_TEX_HEIGHT_MASK,
-            splatIndex >> SPLAT_TEX_LAYER_BITS
+            newSplatIndex & SPLAT_TEX_WIDTH_MASK,
+            (newSplatIndex >> SPLAT_TEX_WIDTH_BITS) & SPLAT_TEX_HEIGHT_MASK,
+            newSplatIndex >> SPLAT_TEX_LAYER_BITS
         );
     }
 

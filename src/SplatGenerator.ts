@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { GeneratorState } from "./SplatAccumulator";
 import type { SplatEdit } from "./SplatEdit";
 import {
   type Dyno,
@@ -113,7 +114,8 @@ export class SplatTransformer {
     const quaternion = new THREE.Quaternion();
     const position = new THREE.Vector3();
     transform.decompose(position, quaternion, scale);
-    const newScale = (scale.x + scale.y + scale.z) / 3;
+    const newScale =
+      (Math.abs(scale.x) + Math.abs(scale.y) + Math.abs(scale.z)) / 3;
 
     let updated = false;
     if (newScale !== this.scale.value) {
@@ -170,15 +172,23 @@ export class SplatGenerator extends THREE.Object3D {
     time,
     deltaTime,
     viewToWorld,
-    pixelScale,
+    camera,
+    renderSize,
     globalEdits,
+    sortState,
+    lastState,
+    newState,
   }: {
     object: SplatGenerator;
     time: number;
     deltaTime: number;
     viewToWorld: THREE.Matrix4;
-    pixelScale?: number;
+    camera?: THREE.Camera;
+    renderSize?: THREE.Vector2;
     globalEdits: SplatEdit[];
+    sortState?: GeneratorState;
+    lastState?: GeneratorState;
+    newState?: GeneratorState;
   }) => void;
   version: number;
 
@@ -200,15 +210,23 @@ export class SplatGenerator extends THREE.Object3D {
       time,
       deltaTime,
       viewToWorld,
-      pixelScale,
+      camera,
+      renderSize,
       globalEdits,
+      sortState,
+      lastState,
+      newState,
     }: {
       object: SplatGenerator;
       time: number;
       deltaTime: number;
       viewToWorld: THREE.Matrix4;
-      pixelScale?: number;
+      camera?: THREE.Camera;
+      renderSize?: THREE.Vector2;
       globalEdits: SplatEdit[];
+      sortState?: GeneratorState;
+      lastState?: GeneratorState;
+      newState?: GeneratorState;
     }) => void;
   }) {
     super();
