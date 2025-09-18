@@ -674,7 +674,7 @@ export class SparkRenderer extends THREE.Mesh {
       const sortMapping = viewpoint.display.mapping;
       const splatMapping = viewpoint.display.accumulator.mapping.reduce(
         (map, record) => {
-          map.set(record.node, record);
+          map.set(record.object, record);
           return map;
         },
         new Map<SplatGenerator, GeneratorMapping>(),
@@ -684,7 +684,7 @@ export class SparkRenderer extends THREE.Mesh {
       for (let i = 0; i < sortMapping.length; i++) {
         this.uniforms.indexMapping.value[4 * i + 0] = sortMapping[i].base;
         this.uniforms.indexMapping.value[4 * i + 1] = sortMapping[i].count;
-        const mapped = splatMapping.get(sortMapping[i].node);
+        const mapped = splatMapping.get(sortMapping[i].object);
         if (mapped) {
           this.uniforms.indexMapping.value[4 * i + 2] = mapped.base;
           this.uniforms.indexMapping.value[4 * i + 3] = mapped.count;
@@ -804,7 +804,7 @@ export class SparkRenderer extends THREE.Mesh {
 
     // Create a lookup from last active SplatGenerator to Gsplat mapping record
     const activeMapping = this.active.mapping.reduce((map, record) => {
-      map.set(record.node, record);
+      map.set(record.object, record);
       return map;
     }, new Map<SplatGenerator, GeneratorMapping>());
 
@@ -815,7 +815,7 @@ export class SparkRenderer extends THREE.Mesh {
     const displayMapping = new Map<SplatGenerator, GeneratorMapping>();
     if (this.viewpoint.display) {
       for (const mapping of this.viewpoint.display.mapping) {
-        displayMapping.set(mapping.node, mapping);
+        displayMapping.set(mapping.object, mapping);
       }
     }
 
@@ -910,12 +910,12 @@ export class SparkRenderer extends THREE.Mesh {
       const splatCounts = genOrder.map((g) => g.numSplats);
       const { maxSplats, mapping } =
         accumulator.splats.generateMapping(splatCounts);
-      const newGenerators = genOrder.map((node, gIndex) => {
+      const newGenerators = genOrder.map((object, gIndex) => {
         const { base, count } = mapping[gIndex];
         return {
-          node,
-          generator: node.generator,
-          version: node.version,
+          object,
+          generator: object.generator,
+          version: object.version,
           base,
           count,
         };
@@ -1116,7 +1116,9 @@ export class SparkRenderer extends THREE.Mesh {
     generator,
     rgba,
   }: { generator: SplatGenerator; rgba?: RgbaArray }): RgbaArray {
-    const mapping = this.active.mapping.find(({ node }) => node === generator);
+    const mapping = this.active.mapping.find(
+      ({ object }) => object === generator,
+    );
     if (!mapping) {
       throw new Error("Generator not found");
     }

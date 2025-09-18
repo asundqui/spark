@@ -9,7 +9,7 @@ export class NewSplatAccumulator {
   splats: PackedSplats;
   originToWorld = new THREE.Matrix4();
   time = 0;
-  mapping: Map<SplatGenerator, GeneratorMapping> = new Map();
+  mapping: Map<unknown, GeneratorMapping> = new Map();
 
   worldToOrigin = new SplatTransformer();
   viewToWorld = new THREE.Matrix4();
@@ -50,7 +50,7 @@ export class NewSplatAccumulator {
     renderer: THREE.WebGLRenderer;
     scene: THREE.Scene;
     time?: number;
-    sortMapping: Map<SplatGenerator, GeneratorMapping>;
+    sortMapping: Map<unknown, GeneratorMapping>;
     lastSplats?: NewSplatAccumulator;
     origin?: THREE.Vector3;
     originToWorld?: THREE.Matrix4;
@@ -84,7 +84,7 @@ export class NewSplatAccumulator {
         }
       }
     });
-    const allNewState = new Map<SplatGenerator, GeneratorState>();
+    const allNewState = new Map<unknown, GeneratorState>();
 
     for (const object of allGenerators) {
       const sortState = sortMapping.get(object)?.state;
@@ -119,19 +119,45 @@ export class NewSplatAccumulator {
       }
     });
 
-    const splatCounts = visibleGenerators.map((g) => g.numSplats);
+    const splatChunks: {
+      object: SplatGenerator;
+      multi?: unknown;
+      numSplats: number;
+    }[] = [];
+    for (const generator of visibleGenerators) {
+      splatChunks.push({ object: generator, numSplats: generator.numSplats });
+      if (generator.multiSplats) {
+        for (const [multi, count] of generator.multiSplats.entries()) {
+          splatChunks.push({ object: generator, multi, numSplats: count });
+        }
+      }
+    }
+
+    const splatCounts = splatChunks.map((g) => g.numSplats);
     const { maxSplats, mapping } = this.splats.generateMapping(splatCounts);
     this.ensureGenerate(maxSplats);
     let totalSplats = 0;
 
     this.mapping = mapping.reduce((map, { base, count }, index) => {
-      const node = visibleGenerators[index];
-      const state = allNewState.get(node);
+      const { object, multi } = splatChunks[index];
+      const reference = multi ?? object;
+      const state = allNewState.get(reference) ?? {};
 
-      const generator = node.generator;
+      const generator = object.generator;
       const version = renderer.info.render.frame;
       if (generator && count > 0) {
         try {
+          if (multi) {
+            const sortState = sortMapping.get(multi)?.state;
+            const lastState = lastSplats?.mapping.get(multi)?.state;
+            object.prepareMulti?.({
+              object,
+              multi,
+              sortState,
+              lastState,
+              newState: state,
+            });
+          }
           this.splats.generate({
             renderer,
             generator,
@@ -139,14 +165,22 @@ export class NewSplatAccumulator {
             count,
           });
         } catch (error) {
-          node.generator = undefined;
-          node.generatorError = error;
+          object.generator = undefined;
+          object.generatorError = error;
         }
       }
-      map.set(node, { node, generator, version, base, count, state });
+      map.set(reference, {
+        object,
+        multi,
+        generator,
+        version,
+        base,
+        count,
+        state,
+      });
       totalSplats = Math.max(totalSplats, base + count);
       return map;
-    }, new Map<SplatGenerator, GeneratorMapping>());
+    }, new Map<unknown, GeneratorMapping>());
 
     this.splats.numSplats = totalSplats;
   }

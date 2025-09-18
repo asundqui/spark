@@ -163,77 +163,61 @@ export class SplatTransformer {
 // updateVersion() (alternatively, set needsUpdate to true) to trigger a
 // re-generation of the Gsplats for this SplatGenerator.
 
+export interface FrameUpdateContext {
+  object: SplatGenerator;
+  time: number;
+  deltaTime: number;
+  viewToWorld: THREE.Matrix4;
+  camera?: THREE.Camera;
+  renderSize?: THREE.Vector2;
+  globalEdits: SplatEdit[];
+  sortState?: GeneratorState;
+  lastState?: GeneratorState;
+  newState: GeneratorState;
+}
+
+export interface PrepareMultiContext {
+  object: SplatGenerator;
+  multi: unknown;
+  sortState?: GeneratorState;
+  lastState?: GeneratorState;
+  newState: GeneratorState;
+}
+
 export class SplatGenerator extends THREE.Object3D {
   numSplats: number;
+  multiSplats?: Map<unknown, number>;
   generator?: GsplatGenerator;
   generatorError?: unknown;
-  frameUpdate?: ({
-    object,
-    time,
-    deltaTime,
-    viewToWorld,
-    camera,
-    renderSize,
-    globalEdits,
-    sortState,
-    lastState,
-    newState,
-  }: {
-    object: SplatGenerator;
-    time: number;
-    deltaTime: number;
-    viewToWorld: THREE.Matrix4;
-    camera?: THREE.Camera;
-    renderSize?: THREE.Vector2;
-    globalEdits: SplatEdit[];
-    sortState?: GeneratorState;
-    lastState?: GeneratorState;
-    newState?: GeneratorState;
-  }) => void;
   version: number;
+
+  frameUpdate?: (context: FrameUpdateContext) => void;
+  prepareMulti?: (context: PrepareMultiContext) => void;
 
   constructor({
     numSplats,
     generator,
     construct,
     update,
+    prepareMulti,
   }: {
     numSplats?: number;
     generator?: GsplatGenerator;
     construct?: (object: SplatGenerator) => {
       generator?: GsplatGenerator;
       numSplats?: number;
-      frameUpdate?: (object: SplatGenerator) => void;
+      frameUpdate?: (context: FrameUpdateContext) => void;
+      prepareMulti?: (context: PrepareMultiContext) => void;
     };
-    update?: ({
-      object,
-      time,
-      deltaTime,
-      viewToWorld,
-      camera,
-      renderSize,
-      globalEdits,
-      sortState,
-      lastState,
-      newState,
-    }: {
-      object: SplatGenerator;
-      time: number;
-      deltaTime: number;
-      viewToWorld: THREE.Matrix4;
-      camera?: THREE.Camera;
-      renderSize?: THREE.Vector2;
-      globalEdits: SplatEdit[];
-      sortState?: GeneratorState;
-      lastState?: GeneratorState;
-      newState?: GeneratorState;
-    }) => void;
+    update?: (context: FrameUpdateContext) => void;
+    prepareMulti?: (context: PrepareMultiContext) => void;
   }) {
     super();
 
     this.numSplats = numSplats ?? 0;
     this.generator = generator;
     this.frameUpdate = update;
+    this.prepareMulti = prepareMulti;
     this.version = 0;
 
     if (construct) {

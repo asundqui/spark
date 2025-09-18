@@ -46,21 +46,7 @@ export class RgbaArray {
   dyno: DynoUniform<typeof TRgbaArray, "rgbaArray">;
 
   constructor(options: RgbaArrayOptions = {}) {
-    this.dyno = new DynoUniform({
-      key: "rgbaArray",
-      type: TRgbaArray,
-      globals: () => [defineRgbaArray],
-      value: {
-        texture: RgbaArray.getEmpty(),
-        count: 0,
-      },
-      update: (value) => {
-        value.texture =
-          this.readback?.getTexture() ?? this.source ?? RgbaArray.getEmpty();
-        value.count = this.count;
-        return value;
-      },
-    });
+    this.dyno = new DynoRgbaArray({ rgbaArray: this });
 
     if (options.array) {
       // Initialize with given array
@@ -132,7 +118,7 @@ export class RgbaArray {
       if (!this.source) {
         const { width, height, depth } = getTextureSize(this.capacity);
         this.source = new THREE.DataArrayTexture(
-          this.array,
+          this.array as Uint8Array<ArrayBuffer>,
           width,
           height,
           depth,
@@ -280,4 +266,36 @@ export function readRgbaArray(
       `),
   });
   return dyno.outputs.rgba;
+}
+
+export const dynoRgbaArray = (rgbaArray?: RgbaArray) =>
+  new DynoRgbaArray({ rgbaArray });
+
+export class DynoRgbaArray extends DynoUniform<
+  typeof TRgbaArray,
+  "rgbaArray",
+  {
+    texture: THREE.DataArrayTexture;
+    count: number;
+  }
+> {
+  rgbaArray?: RgbaArray;
+
+  constructor({ rgbaArray }: { rgbaArray?: RgbaArray } = {}) {
+    super({
+      key: "rgbaArray",
+      type: TRgbaArray,
+      globals: () => [defineRgbaArray],
+      value: {
+        texture: RgbaArray.getEmpty(),
+        count: 0,
+      },
+      update: (value) => {
+        value.texture = this.rgbaArray?.getTexture() ?? RgbaArray.getEmpty();
+        value.count = this.rgbaArray?.count ?? 0;
+        return value;
+      },
+    });
+    this.rgbaArray = rgbaArray;
+  }
 }

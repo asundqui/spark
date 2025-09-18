@@ -16,7 +16,8 @@ export type GeneratorState = object;
 // A GeneratorMapping describes a Gsplat range that was generated, including
 // which generator and its version number.
 export type GeneratorMapping = {
-  node: SplatGenerator;
+  object: SplatGenerator;
+  multi?: unknown;
   generator?: GsplatGenerator;
   version: number;
   base: number;
@@ -67,15 +68,15 @@ export class SplatAccumulator {
   }) {
     // Create a lookup from last SplatGenerator
     const mapping = this.mapping.reduce((map, record) => {
-      map.set(record.node, record);
+      map.set(record.object, record);
       return map;
     }, new Map<SplatGenerator, GeneratorMapping>());
 
     // Run generators that are different from existing mapping
     let updated = 0;
     let numSplats = 0;
-    for (const { node, generator, version, base, count } of generators) {
-      const current = mapping.get(node);
+    for (const { object, generator, version, base, count } of generators) {
+      const current = mapping.get(object);
       if (
         forceUpdate ||
         generator !== current?.generator ||
@@ -94,8 +95,8 @@ export class SplatAccumulator {
               renderer,
             });
           } catch (error) {
-            node.generator = undefined;
-            node.generatorError = error;
+            object.generator = undefined;
+            object.generatorError = error;
           }
           updated += 1;
         }
@@ -115,13 +116,15 @@ export class SplatAccumulator {
     if (this.mapping.length !== other.mapping.length) {
       return false;
     }
-    return this.mapping.every(({ node, base, count }, i) => {
+    return this.mapping.every(({ object, base, count }, i) => {
       const {
-        node: otherNode,
+        object: otherObject,
         base: otherBase,
         count: otherCount,
       } = other.mapping[i];
-      return node === otherNode && base === otherBase && count === otherCount;
+      return (
+        object === otherObject && base === otherBase && count === otherCount
+      );
     });
   }
 }

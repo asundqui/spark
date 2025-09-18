@@ -226,12 +226,11 @@ export class NewSparkRenderer extends THREE.Mesh {
 
   active: NewSplatAccumulator;
   pending: NewSplatAccumulator;
-  sortMapping: Map<SplatGenerator, GeneratorMapping>;
+  sortMapping: Map<unknown, GeneratorMapping>;
   sortDirty: boolean;
   sorting: boolean;
   readback: Uint32Array;
   orderingFreelist: FreeList<Uint32Array, number>;
-  // pendingGeometry: SplatGeometry;
 
   private lastFrame = -1;
 
@@ -298,7 +297,6 @@ export class NewSparkRenderer extends THREE.Mesh {
       allocate: (maxSplats) => new Uint32Array(maxSplats),
       valid: (ordering, maxSplats) => ordering.length === maxSplats,
     });
-    // this.pendingGeometry = new SplatGeometry(new Uint32Array(1), 0);
   }
 
   static makeUniforms() {
@@ -431,16 +429,17 @@ export class NewSparkRenderer extends THREE.Mesh {
     // Alternating debug flag that can aid in visual debugging
     this.uniforms.debugFlag.value = (performance.now() / 1000.0) % 2.0 < 1.0;
 
-    const numIndexMapping = this.sortMapping.size;
-    this.uniforms.numIndexMapping.value = numIndexMapping;
-    let i = 0;
+    this.uniforms.numIndexMapping.value = 0;
     for (const mapping of this.sortMapping.values()) {
-      const active = this.active.mapping.get(mapping.node);
-      this.uniforms.indexMapping.value[4 * i + 0] = mapping.base;
-      this.uniforms.indexMapping.value[4 * i + 1] = mapping.count;
-      this.uniforms.indexMapping.value[4 * i + 2] = active ? active.base : 0;
-      this.uniforms.indexMapping.value[4 * i + 3] = active ? active.count : 0;
-      ++i;
+      if (mapping.count > 0) {
+        const active = this.active.mapping.get(mapping.multi ?? mapping.object);
+        const i4 = this.uniforms.numIndexMapping.value * 4;
+        this.uniforms.indexMapping.value[i4 + 0] = mapping.base;
+        this.uniforms.indexMapping.value[i4 + 1] = mapping.count;
+        this.uniforms.indexMapping.value[i4 + 2] = active ? active.base : 0;
+        this.uniforms.indexMapping.value[i4 + 3] = active ? active.count : 0;
+        this.uniforms.numIndexMapping.value += 1;
+      }
     }
   }
 
@@ -486,7 +485,6 @@ export class NewSparkRenderer extends THREE.Mesh {
       let activeSplats = 0;
       let ordering = this.orderingFreelist.alloc(maxSplats);
       this.readback = reader.ensureBuffer(maxSplats, this.readback);
-      // console.log(`maxSplats = ${maxSplats}`);
 
       const worldToOrigin = this.active.originToWorld.clone().invert();
       const viewToOrigin = this.active.viewToWorld
@@ -505,7 +503,6 @@ export class NewSparkRenderer extends THREE.Mesh {
         .normalize();
       dynoDepthBias.value = this.depthBias ?? 1.0;
       dynoSplats.packedSplats = this.active.splats;
-      // console.log(`dynoSplats.packedSplats = ${dynoSplats.packedSplats.maxSplats}, ${dynoSplats.packedSplats.numSplats}`);
 
       const sortMapping = this.active.mapping;
       this.sortDirty = false;
@@ -516,8 +513,6 @@ export class NewSparkRenderer extends THREE.Mesh {
         count: numSplats,
         readback: this.readback,
       });
-      // console.log(`readback = ${this.readback.length}`);
-      // console.log(`readback = ${this.readback.slice(0, 10)}`);
 
       const result = (await withWorker(async (worker) => {
         return worker.call("sort32Splats", {
@@ -538,21 +533,7 @@ export class NewSparkRenderer extends THREE.Mesh {
       this.readback = result.readback as Uint32Array;
       ordering = result.ordering;
       activeSplats = result.activeSplats;
-      // console.log(`activeSplats = ${activeSplats}, ordering = ${ordering.slice(0, 10)}`);
-      console.log(`activeSplats = ${activeSplats}`);
-
-      // const oldOrdering = this.pendingGeometry.ordering;
-      // if (oldOrdering.length === ordering.length) {
-      //   this.pendingGeometry.update(ordering, activeSplats);
-      // } else {
-      //   this.pendingGeometry.dispose();
-      //   this.pendingGeometry = new SplatGeometry(ordering, activeSplats);
-      // }
-      // this.orderingFreelist.free(oldOrdering);
-
-      // const oldGeometry = this.geometry as SplatGeometry;
-      // this.geometry = this.pendingGeometry;
-      // this.pendingGeometry = oldGeometry;
+      // console.log(`activeSplats = ${activeSplats}`);
 
       const oldOrdering = (this.geometry as SplatGeometry).ordering;
       this.geometry.dispose();

@@ -692,12 +692,12 @@ export class SparkViewpoint {
 
       const displayMapping = new Map<SplatGenerator, GeneratorMapping>();
       for (const mapping of this.display.mapping) {
-        displayMapping.set(mapping.node, mapping);
+        displayMapping.set(mapping.object, mapping);
       }
       for (const mapping of accumulator.mapping) {
-        const oldCount = displayMapping.get(mapping.node)?.count ?? 0;
+        const oldCount = displayMapping.get(mapping.object)?.count ?? 0;
         if (oldCount !== mapping.count) {
-          mapping.node.updateVersion();
+          mapping.object.updateVersion();
         }
       }
       this.display.mapping = accumulator.mapping;

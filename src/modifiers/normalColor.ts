@@ -40,7 +40,6 @@ export function makeNormalColorModifier(splatToView: SplatTransformer) {
 }
 
 export function setWorldNormalColor(splats: SplatMesh) {
-  splats.enableWorldToView = true;
   splats.worldModifier = makeNormalColorModifier(splats.context.worldToView);
   splats.updateGenerator();
 }

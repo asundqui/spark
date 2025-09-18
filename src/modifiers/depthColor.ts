@@ -41,7 +41,6 @@ export function setDepthColor(
   maxDepth: number,
   reverse?: boolean,
 ) {
-  splats.enableWorldToView = true;
   const dynoMinDepth = dynoConst("float", minDepth);
   const dynoMaxDepth = dynoConst("float", maxDepth);
   const dynoReverse = dynoConst("bool", reverse ?? false);

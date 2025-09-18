@@ -254,7 +254,7 @@ export class DynoUniform<
   }
 }
 
-export class DynoBool<K extends string> extends DynoUniform<
+export class DynoBool<K extends string = "value"> extends DynoUniform<
   "bool",
   K,
   boolean
@@ -272,7 +272,11 @@ export class DynoBool<K extends string> extends DynoUniform<
   }
 }
 
-export class DynoUint<K extends string> extends DynoUniform<"uint", K, number> {
+export class DynoUint<K extends string = "value"> extends DynoUniform<
+  "uint",
+  K,
+  number
+> {
   constructor({
     key,
     value,
@@ -286,7 +290,11 @@ export class DynoUint<K extends string> extends DynoUniform<"uint", K, number> {
   }
 }
 
-export class DynoInt<K extends string> extends DynoUniform<"int", K, number> {
+export class DynoInt<K extends string = "value"> extends DynoUniform<
+  "int",
+  K,
+  number
+> {
   constructor({
     key,
     value,

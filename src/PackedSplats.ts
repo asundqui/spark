@@ -144,9 +144,6 @@ export class PackedSplats {
   // const gsplat = dyno.readPackedSplats(this.dyno, dynoIndex);
   dyno: DynoUniform<typeof TPackedSplats, "packedSplats">;
   dynoRgbMinMaxLnScaleMinMax: DynoUniform<"vec4", "rgbMinMaxLnScaleMinMax">;
-  dynoSh1MinMax: DynoUniform<"vec2", "sh1MinMax">;
-  dynoSh2MinMax: DynoUniform<"vec2", "sh2MinMax">;
-  dynoSh3MinMax: DynoUniform<"vec2", "sh3MinMax">;
 
   constructor(options: PackedSplatsOptions = {}) {
     this.extra = {};
@@ -162,39 +159,6 @@ export class PackedSplats {
           this.splatEncoding?.rgbMax ?? 1.0,
           this.splatEncoding?.lnScaleMin ?? LN_SCALE_MIN,
           this.splatEncoding?.lnScaleMax ?? LN_SCALE_MAX,
-        );
-        return value;
-      },
-    });
-    this.dynoSh1MinMax = new DynoVec2({
-      key: "sh1MinMax",
-      value: new THREE.Vector2(-1, 1),
-      update: (value) => {
-        value.set(
-          this.splatEncoding?.sh1Min ?? -1,
-          this.splatEncoding?.sh1Max ?? 1,
-        );
-        return value;
-      },
-    });
-    this.dynoSh2MinMax = new DynoVec2({
-      key: "sh2MinMax",
-      value: new THREE.Vector2(-1, 1),
-      update: (value) => {
-        value.set(
-          this.splatEncoding?.sh2Min ?? -1,
-          this.splatEncoding?.sh2Max ?? 1,
-        );
-        return value;
-      },
-    });
-    this.dynoSh3MinMax = new DynoVec2({
-      key: "sh3MinMax",
-      value: new THREE.Vector2(-1, 1),
-      update: (value) => {
-        value.set(
-          this.splatEncoding?.sh3Min ?? -1,
-          this.splatEncoding?.sh3Max ?? 1,
         );
         return value;
       },
@@ -659,7 +623,7 @@ export class PackedSplats {
             throw new Error("Mismatched packedArray and extended setting");
           }
           this.source = new THREE.DataArrayTexture(
-            this.packedArray,
+            this.packedArray as Uint32Array<ArrayBuffer>,
             width,
             height,
             depth,
@@ -675,7 +639,7 @@ export class PackedSplats {
           }
           this.source = this.packedArray.map((packedArray) => {
             const source = new THREE.DataArrayTexture(
-              packedArray,
+              packedArray as Uint32Array<ArrayBuffer>,
               width,
               height,
               depth,

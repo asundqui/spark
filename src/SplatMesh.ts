@@ -1,12 +1,18 @@
 import * as THREE from "three";
 
 import init_wasm, { raycast_splats } from "spark-internal-rs";
-import { PackedSplats, type SplatEncoding } from "./PackedSplats";
-import { type RgbaArray, readRgbaArray } from "./RgbaArray";
+import {
+  DynoPackedSplats,
+  PackedSplats,
+  type SplatEncoding,
+} from "./PackedSplats";
+import { DynoRgbaArray, type RgbaArray, TRgbaArray } from "./RgbaArray";
 import type { GeneratorState } from "./SplatAccumulator";
 import { SplatEdit, SplatEditSdf, SplatEdits } from "./SplatEdit";
 import {
+  type FrameUpdateContext,
   type GsplatModifier,
+  type PrepareMultiContext,
   SplatGenerator,
   SplatTransformer,
 } from "./SplatGenerator";
@@ -19,26 +25,20 @@ import {
   LN_SCALE_MIN,
 } from "./defines";
 import {
+  DynoBool,
   DynoFloat,
+  DynoIvec3,
   DynoUsampler2DArray,
   type DynoVal,
+  DynoVec2,
   DynoVec4,
   Gsplat,
-  add,
   combineGsplat,
   defineGsplat,
-  dot,
   dyno,
   dynoBlock,
-  dynoConst,
-  extendVec,
-  length,
-  max,
   mul,
-  normalize,
-  pow,
   readPackedSplat,
-  split,
   splitGsplat,
   sub,
   unindent,
@@ -98,21 +98,38 @@ export type SplatMeshOptions = {
 };
 
 export type LodMeta = {
-  cuts: [number, number][];
+  pixelSizes: [number, number][];
   boundCenter: THREE.Vector3;
   boundRadius: number;
 };
 
+export type SplatChunk = {
+  packedSplats: PackedSplats;
+  splatRgba?: RgbaArray;
+  lodMeta?: LodMeta;
+};
+
 export type SplatMeshContext = {
-  transform: SplatTransformer;
+  time: DynoFloat;
+  deltaTime: DynoFloat;
+  splats: DynoPackedSplats;
+  splatRgba: DynoRgbaArray;
+  objectToWorld: SplatTransformer;
   viewToWorld: SplatTransformer;
   worldToView: SplatTransformer;
   viewToObject: SplatTransformer;
+  recolor: DynoVec4<THREE.Vector4>;
+  rgbaDisplaceEdits: SplatEdits | null;
+  shCounts: DynoIvec3<THREE.Vector3>;
+  sh1Texture: DynoUsampler2DArray<"sh1", THREE.DataArrayTexture>;
+  sh2Texture: DynoUsampler2DArray<"sh2", THREE.DataArrayTexture>;
+  sh3Texture: DynoUsampler2DArray<"sh3", THREE.DataArrayTexture>;
+  sh1MinMax: DynoVec2<"sh1MinMax", THREE.Vector2>;
+  sh2MinMax: DynoVec2<"sh2MinMax", THREE.Vector2>;
+  sh3MinMax: DynoVec2<"sh3MinMax", THREE.Vector2>;
+  enableLod: DynoBool;
   pixelScale: DynoFloat;
   minPixelSize: DynoFloat;
-  recolor: DynoVec4<THREE.Vector4>;
-  time: DynoFloat;
-  deltaTime: DynoFloat;
 };
 
 export class SplatMesh extends SplatGenerator {
@@ -148,14 +165,6 @@ export class SplatMesh extends SplatGenerator {
 
   objectModifier?: GsplatModifier;
   worldModifier?: GsplatModifier;
-  // Set to true to have the viewToObject property in context be updated each frame.
-  // If the mesh has extra.sh1 (first order spherical harmonics directional lighting)
-  // this property will always be updated. (default: false)
-  enableViewToObject = false;
-  // Set to true to have context.viewToWorld updated each frame. (default: false)
-  enableViewToWorld = false;
-  // Set to true to have context.worldToView updated each frame. (default: false)
-  enableWorldToView = false;
 
   // Optional SplatSkinning instance for animating splats with dual-quaternion
   // skeletal animation. (default: null)
@@ -165,8 +174,6 @@ export class SplatMesh extends SplatGenerator {
   // children in the scene graph will be added automatically. (default: null)
   edits: SplatEdit[] | null = null;
   editable: boolean;
-  // Compiled SplatEdits for applying SDF edits to splat RGBA + centers
-  private rgbaDisplaceEdits: SplatEdits | null = null;
   // Optional RgbaArray to overwrite splat RGBA values with custom values.
   // Useful for "baking" RGB and opacity edits into the SplatMesh. (default: null)
   splatRgba: RgbaArray | null = null;
@@ -184,59 +191,13 @@ export class SplatMesh extends SplatGenerator {
   lodScale = 1.0;
   // LoD tree and bounding metadata
   lodMeta: LodMeta | null = null;
+  // Multi-splat chunks
+  chunks: SplatChunk[] | null = null;
 
   constructor(options: SplatMeshOptions = {}) {
-    const transform = new SplatTransformer();
-    const viewToWorld = new SplatTransformer();
-    const worldToView = new SplatTransformer();
-    const viewToObject = new SplatTransformer();
-    const pixelScale = new DynoFloat({ value: 0 });
-    const minPixelSize = new DynoFloat({ value: 0 });
-    const recolor = new DynoVec4({
-      value: new THREE.Vector4(
-        Number.NEGATIVE_INFINITY,
-        Number.NEGATIVE_INFINITY,
-        Number.NEGATIVE_INFINITY,
-        Number.NEGATIVE_INFINITY,
-      ),
-    });
-    const time = new DynoFloat({ value: 0 });
-    const deltaTime = new DynoFloat({ value: 0 });
-    const context = {
-      transform,
-      viewToWorld,
-      worldToView,
-      viewToObject,
-      pixelScale,
-      minPixelSize,
-      recolor,
-      time,
-      deltaTime,
-    };
-
     super({
-      update: ({
-        time,
-        deltaTime,
-        viewToWorld,
-        camera,
-        renderSize,
-        globalEdits,
-        sortState,
-        lastState,
-        newState,
-      }) =>
-        this.update({
-          time,
-          deltaTime,
-          viewToWorld,
-          camera,
-          renderSize,
-          globalEdits,
-          sortState,
-          lastState,
-          newState,
-        }),
+      update: (context) => this.update(context),
+      prepareMulti: (context) => this.updateMulti(context),
     });
 
     this.packedSplats =
@@ -246,7 +207,48 @@ export class SplatMesh extends SplatGenerator {
     this.editable = options.editable ?? true;
     this.onFrame = options.onFrame;
 
-    this.context = context;
+    this.context = {
+      splats: new DynoPackedSplats(),
+      objectToWorld: new SplatTransformer(),
+      viewToWorld: new SplatTransformer(),
+      worldToView: new SplatTransformer(),
+      viewToObject: new SplatTransformer(),
+      pixelScale: new DynoFloat({ value: 0 }),
+      minPixelSize: new DynoFloat({ value: 0 }),
+      recolor: new DynoVec4({
+        value: new THREE.Vector4().setScalar(Number.NEGATIVE_INFINITY),
+      }),
+      time: new DynoFloat({ value: 0 }),
+      deltaTime: new DynoFloat({ value: 0 }),
+      splatRgba: new DynoRgbaArray(),
+      rgbaDisplaceEdits: null,
+      shCounts: new DynoIvec3({ value: new THREE.Vector3() }),
+      sh1Texture: new DynoUsampler2DArray({
+        value: getEmptySh1Texture(),
+        key: "sh1",
+      }),
+      sh2Texture: new DynoUsampler2DArray({
+        value: getEmptySh2Texture(),
+        key: "sh2",
+      }),
+      sh3Texture: new DynoUsampler2DArray({
+        value: getEmptySh3Texture(),
+        key: "sh3",
+      }),
+      sh1MinMax: new DynoVec2({
+        value: new THREE.Vector2(-1, 1),
+        key: "sh1MinMax",
+      }),
+      sh2MinMax: new DynoVec2({
+        value: new THREE.Vector2(-1, 1),
+        key: "sh2MinMax",
+      }),
+      sh3MinMax: new DynoVec2({
+        value: new THREE.Vector2(-1, 1),
+        key: "sh3MinMax",
+      }),
+      enableLod: new DynoBool({ value: false }),
+    };
     this.objectModifier = options.objectModifier;
     this.worldModifier = options.worldModifier;
 
@@ -315,8 +317,6 @@ export class SplatMesh extends SplatGenerator {
 
   static staticInitialized = SplatMesh.staticInitialize();
   static isStaticInitialized = false;
-
-  static dynoTime = new DynoFloat({ value: 0 });
 
   static async staticInitialize() {
     await init_wasm();
@@ -405,11 +405,7 @@ export class SplatMesh extends SplatGenerator {
   }
 
   constructGenerator(context: SplatMeshContext) {
-    const { transform, viewToObject, pixelScale, minPixelSize, recolor } =
-      context;
-    const enableLod =
-      this.enableLod && (this.packedSplats.splatEncoding?.extended ?? false);
-    const generator = dynoBlock(
+    this.generator = dynoBlock(
       { index: "int" },
       { gsplat: Gsplat },
       ({ index }) => {
@@ -417,69 +413,16 @@ export class SplatMesh extends SplatGenerator {
           throw new Error("index is undefined");
         }
         // Read a Gsplat from the PackedSplats template
-        let gsplat = readPackedSplat(this.packedSplats.dyno, index);
+        let gsplat = readPackedSplat(context.splats, index);
         const { center } = splitGsplat(gsplat).outputs;
 
         // Calculate view direction in object space
-        const viewCenterInObject = viewToObject.translate;
+        const viewCenterInObject = context.viewToObject.translate;
         const viewDelta = sub(center, viewCenterInObject);
 
-        if (enableLod) {
-          const { lods, opacity } = splitGsplat(gsplat).outputs;
-          // const negZ = dynoConst("vec3", new THREE.Vector3(0, 0, -1));
-          // const zVec = viewToObject.applyDir(negZ);
-          // const zDot = max(dot(viewDelta, zVec), dynoConst("float", 0.0));
-          // const zAlt = pow(zDot, dynoConst("float", 2.0));
-          // const zAlt = zDot;
-          const zAlt = length(viewCenterInObject);
-          const pixelSize = mul(pixelScale, zAlt);
-          const adjustedPixelSize = max(pixelSize, minPixelSize);
-          const modulate = modulateLod(adjustedPixelSize, lods);
-          gsplat = combineGsplat({ gsplat, opacity: mul(opacity, modulate) });
-          console.log("*** enableLod");
-        }
-
-        if (this.maxSh >= 1) {
-          // Inject lighting from SH1..SH3
-          const { sh1Texture, sh2Texture, sh3Texture } =
-            this.ensureShTextures();
-          if (sh1Texture) {
-            // Evaluate Spherical Harmonics
-            const viewDir = normalize(viewDelta);
-            const sh1Snorm = evaluateSH1(gsplat, sh1Texture, viewDir);
-            let rgb = rescaleSh(sh1Snorm, this.packedSplats.dynoSh1MinMax);
-            if (this.maxSh >= 2 && sh2Texture) {
-              const sh2Snorm = evaluateSH2(gsplat, sh2Texture, viewDir);
-              rgb = add(
-                rgb,
-                rescaleSh(sh2Snorm, this.packedSplats.dynoSh2MinMax),
-              );
-            }
-            if (this.maxSh >= 3 && sh3Texture) {
-              const sh3Snorm = evaluateSH3(gsplat, sh3Texture, viewDir);
-              rgb = add(
-                rgb,
-                rescaleSh(sh3Snorm, this.packedSplats.dynoSh3MinMax),
-              );
-            }
-
-            // Flash off for 0.3 / 1.0 sec for debugging
-            // const fractTime = fract(SplatMesh.dynoTime);
-            // const lessThan05 = lessThan(fractTime, dynoConst("float", 0.3));
-            // rgb = select(lessThan05, dynoConst("vec3", new THREE.Vector3()), rgb);
-
-            // Add SH lighting to RGBA
-            let { rgba } = splitGsplat(gsplat).outputs;
-            rgba = add(rgba, extendVec(rgb, dynoConst("float", 0.0)));
-            gsplat = combineGsplat({ gsplat, rgba });
-          }
-        }
-
-        if (this.splatRgba) {
-          // Overwrite RGBA with baked RGBA values
-          const rgba = readRgbaArray(this.splatRgba.dyno, index);
-          gsplat = combineGsplat({ gsplat, rgba });
-        }
+        gsplat = maybeApplyLod(context, gsplat, viewDelta);
+        gsplat = maybeApplySH(context, gsplat, viewDelta);
+        gsplat = maybeInjectRgba(context, gsplat);
 
         if (this.skinning) {
           // Transform according to bones + skinning weights
@@ -492,15 +435,18 @@ export class SplatMesh extends SplatGenerator {
         }
 
         // Transform from object to world-space
-        gsplat = transform.applyGsplat(gsplat);
+        gsplat = context.objectToWorld.applyGsplat(gsplat);
 
         // Apply any global recoloring and opacity
-        const recolorRgba = mul(recolor, splitGsplat(gsplat).outputs.rgba);
+        const recolorRgba = mul(
+          this.context.recolor,
+          splitGsplat(gsplat).outputs.rgba,
+        );
         gsplat = combineGsplat({ gsplat, rgba: recolorRgba });
 
-        if (this.rgbaDisplaceEdits) {
+        if (this.context.rgbaDisplaceEdits) {
           // Apply RGBA edit layer SDFs
-          gsplat = this.rgbaDisplaceEdits.modify(gsplat);
+          gsplat = this.context.rgbaDisplaceEdits.modify(gsplat);
         }
         if (this.worldModifier) {
           // Inject world-space Gsplat modifier dyno
@@ -511,7 +457,6 @@ export class SplatMesh extends SplatGenerator {
         return { gsplat };
       },
     );
-    this.generator = generator;
   }
 
   // Call this whenever something changes in the Gsplat processing pipeline,
@@ -520,6 +465,37 @@ export class SplatMesh extends SplatGenerator {
   // pipeline structure emerges after successive changes.
   updateGenerator() {
     this.constructGenerator(this.context);
+  }
+
+  updateSplatContext(chunk?: SplatChunk) {
+    const packedSplats = chunk?.packedSplats ?? this.packedSplats;
+    const splatRgba = chunk?.splatRgba ?? this.splatRgba;
+
+    this.context.splats.packedSplats = packedSplats;
+    this.context.splatRgba.rgbaArray = splatRgba ?? undefined;
+
+    if (this.maxSh >= 1 && packedSplats.extra.sh1) {
+      const { sh1Texture, sh2Texture, sh3Texture } =
+        this.ensureShTextures(packedSplats);
+      this.context.shCounts.value.set(
+        sh1Texture ? packedSplats.numSplats : 0,
+        sh2Texture && this.maxSh >= 2 ? packedSplats.numSplats : 0,
+        sh3Texture && this.maxSh >= 3 ? packedSplats.numSplats : 0,
+      );
+      this.context.sh1Texture.value = sh1Texture?.value ?? getEmptySh1Texture();
+      this.context.sh2Texture.value = sh2Texture?.value ?? getEmptySh2Texture();
+      this.context.sh3Texture.value = sh3Texture?.value ?? getEmptySh3Texture();
+      const { sh1Min, sh1Max, sh2Min, sh2Max, sh3Min, sh3Max } =
+        packedSplats.splatEncoding ?? {};
+      this.context.sh1MinMax.value.set(sh1Min ?? -1, sh1Max ?? 1);
+      this.context.sh2MinMax.value.set(sh2Min ?? -1, sh2Max ?? 1);
+      this.context.sh3MinMax.value.set(sh3Min ?? -1, sh3Max ?? 1);
+    } else {
+      this.context.shCounts.value.set(0, 0, 0);
+    }
+
+    this.context.enableLod.value =
+      this.enableLod && (packedSplats.splatEncoding?.extended ?? false);
   }
 
   // This is called automatically by SparkRenderer and you should not have to
@@ -535,116 +511,37 @@ export class SplatMesh extends SplatGenerator {
     sortState,
     lastState,
     newState,
-  }: {
-    time: number;
-    deltaTime: number;
-    viewToWorld: THREE.Matrix4;
-    camera?: THREE.Camera;
-    renderSize?: THREE.Vector2;
-    globalEdits: SplatEdit[];
-    sortState?: GeneratorState;
-    lastState?: GeneratorState;
-    newState?: GeneratorState;
-  }) {
-    this.context.time.value = time;
-    this.context.deltaTime.value = deltaTime;
-    SplatMesh.dynoTime.value = time;
+  }: FrameUpdateContext) {
+    const context = this.context;
+    context.time.value = time;
+    context.deltaTime.value = deltaTime;
 
-    const { transform, viewToObject, recolor } = this.context;
-    let updated = transform.update(this);
+    this.updateSplatContext();
 
-    if (this.context.viewToWorld.updateFromMatrix(viewToWorld)) {
+    let updated = context.objectToWorld.update(this);
+    if (context.viewToWorld.updateFromMatrix(viewToWorld)) {
       updated = true;
     }
+
     const worldToView = viewToWorld.clone().invert();
-    if (this.context.worldToView.updateFromMatrix(worldToView)) {
+    if (context.worldToView.updateFromMatrix(worldToView)) {
       updated = true;
     }
 
-    const objectToWorld = new THREE.Matrix4().compose(
-      transform.translate.value,
-      transform.rotate.value,
-      new THREE.Vector3().setScalar(transform.scale.value),
-    );
-    const worldToObject = objectToWorld.invert();
+    const worldToObject = this.matrixWorld.clone().invert();
     const viewToObjectMatrix = worldToObject.multiply(viewToWorld);
-    if (viewToObject.updateFromMatrix(viewToObjectMatrix)) {
+    if (context.viewToObject.updateFromMatrix(viewToObjectMatrix)) {
       updated = true;
     }
 
-    if (this.enableLod) {
-      let adjustedScale = 0.0;
-      if (renderSize) {
-        const pixelScale =
-          camera instanceof THREE.PerspectiveCamera
-            ? (2.0 * Math.tan((0.5 * camera.fov * Math.PI) / 180.0)) /
-              renderSize.y
-            : 0.0;
-        adjustedScale = pixelScale * this.lodScale;
-      }
-
-      if (this.context.pixelScale.value !== adjustedScale) {
-        this.context.pixelScale.value = adjustedScale;
-        updated = true;
-      }
-
-      if (this.lodMeta) {
-        const distance = viewToObject.translate.value.distanceTo(
-          this.lodMeta.boundCenter,
-        );
-        const closest = Math.max(0, distance - this.lodMeta.boundRadius);
-        const pixelSize = closest * adjustedScale;
-
-        let lo = 0;
-        let hi = this.lodMeta.cuts.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (this.lodMeta.cuts[mid][0] <= pixelSize) {
-            hi = mid;
-          } else {
-            lo = mid + 1;
-          }
-        }
-
-        const maxSplats =
-          lo < this.lodMeta.cuts.length
-            ? this.lodMeta.cuts[lo][1]
-            : this.packedSplats.numSplats;
-        let minPixelSize =
-          lo < this.lodMeta.cuts.length ? this.lodMeta.cuts[lo][0] : 0.0;
-
-        if (newState) {
-          (newState as { minPixelSize: number }).minPixelSize = minPixelSize;
-        }
-        const typedSortState = sortState as
-          | { minPixelSize?: number }
-          | undefined;
-        minPixelSize = Math.max(
-          minPixelSize,
-          typedSortState?.minPixelSize ?? Number.POSITIVE_INFINITY,
-        );
-        this.context.minPixelSize.value = minPixelSize;
-
-        if (this.numSplats !== maxSplats) {
-          this.numSplats = maxSplats;
-          updated = true;
-        }
-      }
-    } else {
-      if (this.numSplats !== this.packedSplats.numSplats) {
-        this.numSplats = this.packedSplats.numSplats;
-        updated = true;
-      }
-    }
-
-    const newRecolor = new THREE.Vector4(
-      this.recolor.r,
-      this.recolor.g,
-      this.recolor.b,
-      this.opacity,
-    );
-    if (!newRecolor.equals(recolor.value)) {
-      recolor.value.copy(newRecolor);
+    const recolor = context.recolor.value;
+    if (
+      recolor.x !== this.recolor.r ||
+      recolor.y !== this.recolor.g ||
+      recolor.z !== this.recolor.b ||
+      recolor.w !== this.opacity
+    ) {
+      recolor.set(this.recolor.r, this.recolor.g, this.recolor.b, this.opacity);
       updated = true;
     }
 
@@ -672,24 +569,102 @@ export class SplatMesh extends SplatGenerator {
       return { edit, sdfs };
     });
 
-    if (editsSdfs.length > 0 && !this.rgbaDisplaceEdits) {
+    if (editsSdfs.length > 0 && !context.rgbaDisplaceEdits) {
       const edits = editsSdfs.length;
       const sdfs = editsSdfs.reduce(
         (total, edit) => total + edit.sdfs.length,
         0,
       );
-      this.rgbaDisplaceEdits = new SplatEdits({
+      context.rgbaDisplaceEdits = new SplatEdits({
         maxEdits: edits,
         maxSdfs: sdfs,
       });
       this.updateGenerator();
     }
-    if (this.rgbaDisplaceEdits) {
-      const editResult = this.rgbaDisplaceEdits.update(editsSdfs);
+    if (context.rgbaDisplaceEdits) {
+      const editResult = context.rgbaDisplaceEdits.update(editsSdfs);
       updated ||= editResult.updated;
       if (editResult.dynoUpdated) {
         this.updateGenerator();
       }
+    }
+
+    let pixelScale = 0.0;
+    if (renderSize) {
+      pixelScale =
+        camera instanceof THREE.PerspectiveCamera
+          ? (2.0 * Math.tan((0.5 * camera.fov * Math.PI) / 180.0)) /
+            renderSize.y
+          : 0.0;
+      pixelScale *= this.lodScale;
+    }
+
+    if (this.context.pixelScale.value !== pixelScale) {
+      this.context.pixelScale.value = pixelScale;
+      if (this.enableLod) {
+        updated = true;
+      }
+    }
+
+    let numSplats = this.packedSplats.numSplats;
+    if (this.enableLod && this.lodMeta) {
+      const distance = context.viewToObject.translate.value.distanceTo(
+        this.lodMeta.boundCenter,
+      );
+      const closest = Math.max(0, distance - this.lodMeta.boundRadius);
+      const pixelSize = closest * pixelScale;
+      const cut = searchPixelSizes(this.lodMeta.pixelSizes, pixelSize);
+
+      const cutSplats =
+        cut < this.lodMeta.pixelSizes.length
+          ? this.lodMeta.pixelSizes[cut][1]
+          : Number.POSITIVE_INFINITY;
+      numSplats = Math.min(numSplats, cutSplats);
+
+      let minPixelSize =
+        cut < this.lodMeta.pixelSizes.length
+          ? this.lodMeta.pixelSizes[cut][0]
+          : 0.0;
+      (newState as { minPixelSize: number }).minPixelSize = minPixelSize;
+      const sortPixelSize = (sortState as { minPixelSize?: number } | undefined)
+        ?.minPixelSize;
+      minPixelSize = Math.max(
+        minPixelSize,
+        sortPixelSize ?? Number.POSITIVE_INFINITY,
+      );
+      context.minPixelSize.value = minPixelSize;
+    }
+
+    if (this.numSplats !== numSplats) {
+      this.numSplats = numSplats;
+      updated = true;
+    }
+
+    if (this.chunks) {
+      if (!this.multiSplats) {
+        this.multiSplats = new Map();
+      } else {
+        this.multiSplats.clear();
+      }
+      for (const chunk of this.chunks) {
+        let chunkSplats = chunk.packedSplats.numSplats;
+        if (this.enableLod && chunk.lodMeta) {
+          const distance = context.viewToObject.translate.value.distanceTo(
+            chunk.lodMeta.boundCenter,
+          );
+          const closest = Math.max(0, distance - chunk.lodMeta.boundRadius);
+          const pixelSize = closest * pixelScale;
+          const cut = searchPixelSizes(chunk.lodMeta.pixelSizes, pixelSize);
+          const cutSplats =
+            cut < chunk.lodMeta.pixelSizes.length
+              ? chunk.lodMeta.pixelSizes[cut][1]
+              : Number.POSITIVE_INFINITY;
+          chunkSplats = Math.min(chunkSplats, cutSplats);
+        }
+        this.multiSplats.set(chunk, chunkSplats);
+      }
+    } else {
+      this.multiSplats = undefined;
     }
 
     if (updated) {
@@ -697,6 +672,39 @@ export class SplatMesh extends SplatGenerator {
     }
 
     this.onFrame?.({ mesh: this, time, deltaTime });
+  }
+
+  updateMulti({
+    object,
+    multi,
+    sortState,
+    lastState,
+    newState,
+  }: PrepareMultiContext) {
+    const chunk = multi as SplatChunk;
+    this.updateSplatContext(chunk);
+
+    if (this.enableLod && chunk.lodMeta) {
+      const distance = this.context.viewToObject.translate.value.distanceTo(
+        chunk.lodMeta.boundCenter,
+      );
+      const closest = Math.max(0, distance - chunk.lodMeta.boundRadius);
+      const pixelSize = closest * this.context.pixelScale.value;
+      const cut = searchPixelSizes(chunk.lodMeta.pixelSizes, pixelSize);
+
+      let minPixelSize =
+        cut < chunk.lodMeta.pixelSizes.length
+          ? chunk.lodMeta.pixelSizes[cut][0]
+          : 0.0;
+      (newState as { minPixelSize: number }).minPixelSize = minPixelSize;
+      const sortPixelSize = (sortState as { minPixelSize?: number } | undefined)
+        ?.minPixelSize;
+      minPixelSize = Math.max(
+        minPixelSize,
+        sortPixelSize ?? Number.POSITIVE_INFINITY,
+      );
+      this.context.minPixelSize.value = minPixelSize;
+    }
   }
 
   // This method conforms to the standard THREE.Raycaster API, performing object-ray
@@ -770,28 +778,28 @@ export class SplatMesh extends SplatGenerator {
     }
   }
 
-  private ensureShTextures(): {
+  private ensureShTextures(packedSplats: PackedSplats): {
     sh1Texture?: DynoUsampler2DArray<"sh1", THREE.DataArrayTexture>;
     sh2Texture?: DynoUsampler2DArray<"sh2", THREE.DataArrayTexture>;
     sh3Texture?: DynoUsampler2DArray<"sh3", THREE.DataArrayTexture>;
   } {
     // Ensure we have textures for SH1..SH3 if we have data
-    if (!this.packedSplats.extra.sh1) {
+    if (!packedSplats.extra.sh1) {
       return {};
     }
 
-    let sh1Texture = this.packedSplats.extra.sh1Texture as
+    let sh1Texture = packedSplats.extra.sh1Texture as
       | DynoUsampler2DArray<"sh1", THREE.DataArrayTexture>
       | undefined;
     if (!sh1Texture) {
-      let sh1 = this.packedSplats.extra.sh1 as Uint32Array<ArrayBuffer>;
+      let sh1 = packedSplats.extra.sh1 as Uint32Array<ArrayBuffer>;
       const { width, height, depth, maxSplats } = getTextureSize(
         sh1.length / 2,
       );
       if (sh1.length < maxSplats * 2) {
         const newSh1 = new Uint32Array(maxSplats * 2);
         newSh1.set(sh1);
-        this.packedSplats.extra.sh1 = newSh1;
+        packedSplats.extra.sh1 = newSh1;
         sh1 = newSh1;
       }
 
@@ -805,25 +813,25 @@ export class SplatMesh extends SplatGenerator {
         value: texture,
         key: "sh1",
       });
-      this.packedSplats.extra.sh1Texture = sh1Texture;
+      packedSplats.extra.sh1Texture = sh1Texture;
     }
 
-    if (!this.packedSplats.extra.sh2) {
+    if (!packedSplats.extra.sh2) {
       return { sh1Texture };
     }
 
-    let sh2Texture = this.packedSplats.extra.sh2Texture as
+    let sh2Texture = packedSplats.extra.sh2Texture as
       | DynoUsampler2DArray<"sh2", THREE.DataArrayTexture>
       | undefined;
     if (!sh2Texture) {
-      let sh2 = this.packedSplats.extra.sh2 as Uint32Array<ArrayBuffer>;
+      let sh2 = packedSplats.extra.sh2 as Uint32Array<ArrayBuffer>;
       const { width, height, depth, maxSplats } = getTextureSize(
         sh2.length / 4,
       );
       if (sh2.length < maxSplats * 4) {
         const newSh2 = new Uint32Array(maxSplats * 4);
         newSh2.set(sh2);
-        this.packedSplats.extra.sh2 = newSh2;
+        packedSplats.extra.sh2 = newSh2;
         sh2 = newSh2;
       }
 
@@ -837,25 +845,25 @@ export class SplatMesh extends SplatGenerator {
         value: texture,
         key: "sh2",
       });
-      this.packedSplats.extra.sh2Texture = sh2Texture;
+      packedSplats.extra.sh2Texture = sh2Texture;
     }
 
-    if (!this.packedSplats.extra.sh3) {
+    if (!packedSplats.extra.sh3) {
       return { sh1Texture, sh2Texture };
     }
 
-    let sh3Texture = this.packedSplats.extra.sh3Texture as
+    let sh3Texture = packedSplats.extra.sh3Texture as
       | DynoUsampler2DArray<"sh3", THREE.DataArrayTexture>
       | undefined;
     if (!sh3Texture) {
-      let sh3 = this.packedSplats.extra.sh3 as Uint32Array<ArrayBuffer>;
+      let sh3 = packedSplats.extra.sh3 as Uint32Array<ArrayBuffer>;
       const { width, height, depth, maxSplats } = getTextureSize(
         sh3.length / 4,
       );
       if (sh3.length < maxSplats * 4) {
         const newSh3 = new Uint32Array(maxSplats * 4);
         newSh3.set(sh3);
-        this.packedSplats.extra.sh3 = newSh3;
+        packedSplats.extra.sh3 = newSh3;
         sh3 = newSh3;
       }
 
@@ -869,24 +877,17 @@ export class SplatMesh extends SplatGenerator {
         value: texture,
         key: "sh3",
       });
-      this.packedSplats.extra.sh3Texture = sh3Texture;
+      packedSplats.extra.sh3Texture = sh3Texture;
     }
 
     return { sh1Texture, sh2Texture, sh3Texture };
   }
 }
 
-function rescaleSh(sNorm: DynoVal<"vec3">, minMax: DynoVal<"vec2">) {
-  const { x: min, y: max } = split(minMax).outputs;
-  const mid = mul(add(min, max), dynoConst("float", 0.5));
-  const scale = mul(sub(max, min), dynoConst("float", 0.5));
-  return add(mid, mul(sNorm, scale));
-}
-
 const defineEvaluateSH1 = unindent(`
-  vec3 evaluateSH1(Gsplat gsplat, usampler2DArray sh1, vec3 viewDir) {
+  vec3 evaluateSH1(usampler2DArray sh1, int index, vec3 viewDir) {
     // Extract sint7 values packed into 2 x uint32
-    uvec2 packed = texelFetch(sh1, splatTexCoord(gsplat.index), 0).rg;
+    uvec2 packed = texelFetch(sh1, splatTexCoord(index), 0).rg;
     vec3 sh1_0 = vec3(ivec3(
       int(packed.x << 25u) >> 25,
       int(packed.x << 18u) >> 25,
@@ -910,9 +911,9 @@ const defineEvaluateSH1 = unindent(`
 `);
 
 const defineEvaluateSH2 = unindent(`
-  vec3 evaluateSH2(Gsplat gsplat, usampler2DArray sh2, vec3 viewDir) {
+  vec3 evaluateSH2(usampler2DArray sh2, int index, vec3 viewDir) {
     // Extract sint8 values packed into 4 x uint32
-    uvec4 packed = texelFetch(sh2, splatTexCoord(gsplat.index), 0);
+    uvec4 packed = texelFetch(sh2, splatTexCoord(index), 0);
     vec3 sh2_0 = vec3(ivec3(
       int(packed.x << 24u) >> 24,
       int(packed.x << 16u) >> 24,
@@ -948,9 +949,9 @@ const defineEvaluateSH2 = unindent(`
 `);
 
 const defineEvaluateSH3 = unindent(`
-  vec3 evaluateSH3(Gsplat gsplat, usampler2DArray sh3, vec3 viewDir) {
+  vec3 evaluateSH3(usampler2DArray sh3, int index, vec3 viewDir) {
     // Extract sint6 values packed into 4 x uint32
-    uvec4 packed = texelFetch(sh3, splatTexCoord(gsplat.index), 0);
+    uvec4 packed = texelFetch(sh3, splatTexCoord(index), 0);
     vec3 sh3_0 = vec3(ivec3(
       int(packed.x << 26u) >> 26,
       int(packed.x << 20u) >> 26,
@@ -1004,69 +1005,120 @@ const defineEvaluateSH3 = unindent(`
   }
 `);
 
-export function evaluateSH1(
+const defineRescaleSH = unindent(`
+  vec3 rescaleSH(vec3 rgb, vec2 minMax) {
+    float mid = 0.5 * (minMax.x + minMax.y);
+    float scale = 0.5 * (minMax.y - minMax.x);
+    return mid + scale * rgb;
+  }
+`);
+
+function maybeApplySH(
+  context: SplatMeshContext,
   gsplat: DynoVal<typeof Gsplat>,
-  sh1: DynoUsampler2DArray<"sh1", THREE.DataArrayTexture>,
-  viewDir: DynoVal<"vec3">,
-): DynoVal<"vec3"> {
+  viewDelta: DynoVal<"vec3">,
+) {
+  const {
+    shCounts,
+    sh1Texture,
+    sh2Texture,
+    sh3Texture,
+    sh1MinMax,
+    sh2MinMax,
+    sh3MinMax,
+  } = context;
   return dyno({
-    inTypes: { gsplat: Gsplat, sh1: "usampler2DArray", viewDir: "vec3" },
-    outTypes: { rgb: "vec3" },
-    inputs: { gsplat, sh1, viewDir },
-    globals: () => [defineGsplat, defineEvaluateSH1],
-    statements: ({ inputs, outputs }) => {
-      const statements = unindentLines(`
-        if (isGsplatActive(${inputs.gsplat}.flags)) {
-          ${outputs.rgb} = evaluateSH1(${inputs.gsplat}, ${inputs.sh1}, ${inputs.viewDir});
-        } else {
-          ${outputs.rgb} = vec3(0.0);
-        }
-      `);
-      return statements;
+    inTypes: {
+      gsplat: Gsplat,
+      viewDelta: "vec3",
+      shCounts: "ivec3",
+      sh1Texture: "usampler2DArray",
+      sh2Texture: "usampler2DArray",
+      sh3Texture: "usampler2DArray",
+      sh1MinMax: "vec2",
+      sh2MinMax: "vec2",
+      sh3MinMax: "vec2",
     },
-  }).outputs.rgb;
-}
-
-export function evaluateSH2(
-  gsplat: DynoVal<typeof Gsplat>,
-  sh2: DynoVal<"usampler2DArray">,
-  viewDir: DynoVal<"vec3">,
-): DynoVal<"vec3"> {
-  return dyno({
-    inTypes: { gsplat: Gsplat, sh2: "usampler2DArray", viewDir: "vec3" },
-    outTypes: { rgb: "vec3" },
-    inputs: { gsplat, sh2, viewDir },
-    globals: () => [defineGsplat, defineEvaluateSH2],
+    outTypes: { gsplat: Gsplat },
+    inputs: {
+      gsplat,
+      viewDelta,
+      shCounts,
+      sh1Texture,
+      sh2Texture,
+      sh3Texture,
+      sh1MinMax,
+      sh2MinMax,
+      sh3MinMax,
+    },
+    globals: () => [
+      defineGsplat,
+      defineEvaluateSH1,
+      defineEvaluateSH2,
+      defineEvaluateSH3,
+      defineRescaleSH,
+    ],
     statements: ({ inputs, outputs }) =>
       unindentLines(`
-        if (isGsplatActive(${inputs.gsplat}.flags)) {
-          ${outputs.rgb} = evaluateSH2(${inputs.gsplat}, ${inputs.sh2}, ${inputs.viewDir});
-        } else {
-          ${outputs.rgb} = vec3(0.0);
+        ${outputs.gsplat} = ${inputs.gsplat};
+        if (isGsplatActive(${outputs.gsplat}.flags) && any(equal(${inputs.shCounts}, ivec3(0)))) {
+          int index = ${outputs.gsplat}.index;
+          vec3 viewDir = normalize(${inputs.viewDelta});
+
+          if (index < ${inputs.shCounts}.x) {
+            vec3 sh1Snorm = evaluateSH1(${inputs.sh1Texture}, index, viewDir);
+            ${outputs.gsplat}.rgba.rgb += rescaleSH(sh1Snorm, ${inputs.sh1MinMax});
+          }
+          if (index < ${inputs.shCounts}.y) {
+            vec3 sh2Snorm = evaluateSH2(${inputs.sh2Texture}, index, viewDir);
+            ${outputs.gsplat}.rgba.rgb += rescaleSH(sh2Snorm, ${inputs.sh2MinMax});
+          }
+          if (index < ${inputs.shCounts}.z) {
+            vec3 sh3Snorm = evaluateSH3(${inputs.sh3Texture}, index, viewDir);
+            ${outputs.gsplat}.rgba.rgb += rescaleSH(sh3Snorm, ${inputs.sh3MinMax});
+          }
         }
       `),
-  }).outputs.rgb;
+  }).outputs.gsplat;
 }
 
-export function evaluateSH3(
-  gsplat: DynoVal<typeof Gsplat>,
-  sh3: DynoVal<"usampler2DArray">,
-  viewDir: DynoVal<"vec3">,
-): DynoVal<"vec3"> {
-  return dyno({
-    inTypes: { gsplat: Gsplat, sh3: "usampler2DArray", viewDir: "vec3" },
-    outTypes: { rgb: "vec3" },
-    inputs: { gsplat, sh3, viewDir },
-    globals: () => [defineGsplat, defineEvaluateSH3],
-    statements: ({ inputs, outputs }) =>
-      unindentLines(`
-        if (isGsplatActive(${inputs.gsplat}.flags)) {
-          ${outputs.rgb} = evaluateSH3(${inputs.gsplat}, ${inputs.sh3}, ${inputs.viewDir});
-        } else {
-          ${outputs.rgb} = vec3(0.0);
-        }
-      `),
-  }).outputs.rgb;
+const emptyShTextures: THREE.DataArrayTexture[] = [];
+
+function makeEmptyShTexture(n: number) {
+  const texture = new THREE.DataArrayTexture(
+    new Uint32Array(n === 1 ? 2 : 4),
+    1,
+    1,
+    1,
+  );
+  texture.format = n === 1 ? THREE.RGIntegerFormat : THREE.RGBAIntegerFormat;
+  texture.type = THREE.UnsignedIntType;
+  texture.internalFormat = n === 1 ? "RG32UI" : "RGBA32UI";
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function getEmptyShTextures() {
+  if (emptyShTextures.length === 0) {
+    emptyShTextures.push(
+      makeEmptyShTexture(1),
+      makeEmptyShTexture(2),
+      makeEmptyShTexture(3),
+    );
+  }
+  return emptyShTextures;
+}
+
+function getEmptySh1Texture() {
+  return getEmptyShTextures()[0];
+}
+
+function getEmptySh2Texture() {
+  return getEmptyShTextures()[1];
+}
+
+function getEmptySh3Texture() {
+  return getEmptyShTextures()[2];
 }
 
 const defineModulateLod = unindent(`
@@ -1092,18 +1144,65 @@ const defineModulateLod = unindent(`
   }
 `);
 
-export function modulateLod(
-  pixelSize: DynoVal<"float">,
-  lods: DynoVal<"vec4">,
-): DynoVal<"float"> {
+function maybeApplyLod(
+  context: SplatMeshContext,
+  gsplat: DynoVal<typeof Gsplat>,
+  viewDelta: DynoVal<"vec3">,
+) {
+  const { enableLod, pixelScale, minPixelSize } = context;
   return dyno({
-    inTypes: { pixelSize: "float", lods: "vec4" },
-    outTypes: { modulate: "float" },
-    inputs: { pixelSize, lods },
-    globals: () => [defineModulateLod],
+    inTypes: {
+      gsplat: Gsplat,
+      viewDelta: "vec3",
+      enableLod: "bool",
+      pixelScale: "float",
+      minPixelSize: "float",
+    },
+    outTypes: { gsplat: Gsplat },
+    inputs: { gsplat, viewDelta, enableLod, pixelScale, minPixelSize },
+    globals: () => [defineGsplat, defineModulateLod],
     statements: ({ inputs, outputs }) =>
       unindentLines(`
-        ${outputs.modulate} = modulateLod(${inputs.pixelSize}, ${inputs.lods});
+        ${outputs.gsplat} = ${inputs.gsplat};
+        if (${inputs.enableLod} && isGsplatActive(${outputs.gsplat}.flags)) {
+          float distance = length(${inputs.viewDelta});
+          float pixelSize = max(${inputs.minPixelSize}, distance * ${inputs.pixelScale});
+          ${outputs.gsplat}.rgba.a *= modulateLod(pixelSize, ${outputs.gsplat}.lods);
+        }
       `),
-  }).outputs.modulate;
+  }).outputs.gsplat;
+}
+
+function maybeInjectRgba(
+  context: SplatMeshContext,
+  gsplat: DynoVal<typeof Gsplat>,
+) {
+  const { splatRgba } = context;
+  return dyno({
+    inTypes: { gsplat: Gsplat, splatRgba: TRgbaArray },
+    outTypes: { gsplat: Gsplat },
+    inputs: { gsplat, splatRgba },
+    globals: () => [defineGsplat],
+    statements: ({ inputs, outputs }) =>
+      unindentLines(`
+        ${outputs.gsplat} = ${inputs.gsplat};
+        if (isGsplatActive(${outputs.gsplat}.flags) && (${outputs.gsplat}.index < ${inputs.splatRgba}.count)) {
+          ${outputs.gsplat}.rgba = texelFetch(${inputs.splatRgba}.texture, splatTexCoord(${outputs.gsplat}.index), 0);
+        }
+      `),
+  }).outputs.gsplat;
+}
+
+function searchPixelSizes(pixelSizes: [number, number][], pixelSize: number) {
+  let lo = 0;
+  let hi = pixelSizes.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (pixelSizes[mid][0] <= pixelSize) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  return lo;
 }
