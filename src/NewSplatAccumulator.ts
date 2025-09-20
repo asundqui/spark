@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { dyno } from ".";
+import { SplatEdit, dyno } from ".";
 import { PackedSplats, type SplatEncoding } from "./PackedSplats";
 import type { GeneratorMapping, GeneratorState } from "./SplatAccumulator";
 import { SplatGenerator, SplatTransformer } from "./SplatGenerator";
@@ -46,6 +46,7 @@ export class NewSplatAccumulator {
     originToWorld,
     camera,
     renderSize,
+    globalLodScale,
   }: {
     renderer: THREE.WebGLRenderer;
     scene: THREE.Scene;
@@ -56,6 +57,7 @@ export class NewSplatAccumulator {
     originToWorld?: THREE.Matrix4;
     camera?: THREE.Camera;
     renderSize?: THREE.Vector2;
+    globalLodScale: number;
   }) {
     if (origin) {
       this.originToWorld.makeTranslation(origin.x, origin.y, origin.z);
@@ -86,6 +88,21 @@ export class NewSplatAccumulator {
     });
     const allNewState = new Map<unknown, GeneratorState>();
 
+    const globalEditsSet = new Set<SplatEdit>();
+    scene.traverseVisible((node) => {
+      if (node instanceof SplatEdit) {
+        let ancestor = node.parent;
+        while (ancestor != null && !(ancestor instanceof SplatMesh)) {
+          ancestor = ancestor.parent;
+        }
+        if (ancestor == null) {
+          // Not part of a SplatMesh so it's a global edit
+          globalEditsSet.add(node);
+        }
+      }
+    });
+    const globalEdits = Array.from(globalEditsSet);
+
     for (const object of allGenerators) {
       const sortState = sortMapping.get(object)?.state;
       const lastState = lastSplats?.mapping.get(object)?.state;
@@ -98,7 +115,8 @@ export class NewSplatAccumulator {
           viewToWorld: this.viewToWorld,
           camera,
           renderSize,
-          globalEdits: [],
+          globalEdits,
+          globalLodScale,
           sortState,
           lastState,
           newState,

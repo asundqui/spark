@@ -102,6 +102,7 @@
       }).listen();
 
       gui.add(spark, "autoUpdate").name("Auto update").listen();
+      gui.add(spark, "globalLodScale", 0.1, 10.0, 0.1).name("Global LoD pixel size").listen();
 
       async function loadLodSplats(url) {
         const packedSplats = new PackedSplats({ url });
@@ -193,10 +194,28 @@
       let lastTime = null;
       let lastPosition = new THREE.Vector3();
       let renderCount = 0;
+      let avgFrameInterval = 0;
+      const frameTarget = 60;
 
       renderer.setAnimationLoop(function animate(time, xrFrame) {
         const deltaTime = (time - (lastTime ?? time)) / 1000;
         lastTime = time;
+        avgFrameInterval = 0.4 * avgFrameInterval + 0.6 * deltaTime;
+
+        if (frameTarget && avgFrameInterval > 0) {
+          const frameRate = 1 / avgFrameInterval;
+          const target = frameTarget * 0.9;
+          if (frameRate < target) {
+            spark.globalLodScale *= 1.01;
+          } else {
+            spark.globalLodScale *= 0.99;
+          }
+          spark.globalLodScale = Math.max(1.0, Math.min(10.0, spark.globalLodScale));
+          // if (Math.random() < 0.1) {
+          //   console.log(`Frame rate: ${frameRate}, Global LoD pixel size: ${spark.globalLodScale}`);
+          // }
+        }
+
         controls.update(camera);
         
         if (++renderCount == 1) {

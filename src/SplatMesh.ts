@@ -510,6 +510,7 @@ export class SplatMesh extends SplatGenerator {
     camera,
     renderSize,
     globalEdits,
+    globalLodScale,
     sortState,
     lastState,
     newState,
@@ -598,7 +599,7 @@ export class SplatMesh extends SplatGenerator {
           ? (2.0 * Math.tan((0.5 * camera.fov * Math.PI) / 180.0)) /
             renderSize.y
           : 0.0;
-      pixelScale *= this.lodScale;
+      pixelScale *= this.lodScale * globalLodScale;
     }
 
     if (context.pixelScale.value !== pixelScale) {

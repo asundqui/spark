@@ -219,6 +219,7 @@ export class NewSparkRenderer extends THREE.Mesh {
   focalAdjustment: number;
   encodeLinear: boolean;
   splatEncoding: SplatEncoding;
+  globalLodScale = 1.0;
 
   sortRadial?: boolean;
   depthBias?: number;
@@ -463,6 +464,7 @@ export class NewSparkRenderer extends THREE.Mesh {
       originToWorld,
       camera,
       renderSize,
+      globalLodScale: this.globalLodScale,
     });
     this.sortDirty = true;
 

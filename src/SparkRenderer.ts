@@ -827,6 +827,7 @@ export class SparkRenderer extends THREE.Mesh {
         deltaTime,
         viewToWorld,
         globalEdits,
+        globalLodScale: 1.0,
         newState: {},
       });
     }

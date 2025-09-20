@@ -171,6 +171,7 @@ export interface FrameUpdateContext {
   camera?: THREE.Camera;
   renderSize?: THREE.Vector2;
   globalEdits: SplatEdit[];
+  globalLodScale: number;
   sortState?: GeneratorState;
   lastState?: GeneratorState;
   newState: GeneratorState;
