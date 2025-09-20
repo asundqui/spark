@@ -7,6 +7,7 @@ use crate::lod::Gsplat;
 const SPZ_MAGIC: u32 = 0x5053_474e; // 'NGSP'
 const SH_C0: f32 = 0.28209479177387814;
 
+#[allow(unused)]
 pub struct SpzReader {
     data: Vec<u8>,
     offset: usize,

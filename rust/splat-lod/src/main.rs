@@ -128,6 +128,7 @@ fn write_txt(content: &str, filename: &str) {
     file.write_all(content.as_bytes()).unwrap();
 }
 
+#[allow(unused)]
 fn create_splats() -> Vec<Gsplat> {
     let mut splats = Vec::new();
     let step = 0.02;
@@ -163,6 +164,7 @@ fn create_splats() -> Vec<Gsplat> {
     splats
 }
 
+#[allow(unused)]
 fn partition_splats(splats: &[Gsplat], grid_size: f32) -> AHashMap<[i64; 3], Vec<Gsplat>> {
     let mut grid = AHashMap::new();
     for splat in splats {
@@ -183,6 +185,27 @@ struct LodMeta {
     bound_radius: f32,
 }
 
+impl rad::RadGsplatReader for Vec<Gsplat> {
+    fn center(&self, i: usize) -> [f32; 3] {
+        self[i].center
+    }
+    fn alpha(&self, i: usize) -> f32 {
+        self[i].opacity
+    }
+    fn rgb(&self, i: usize) -> [f32; 3] {
+        self[i].color
+    }
+    fn scales(&self, i: usize) -> [f32; 3] {
+        self[i].scales
+    }
+    fn lod_scales(&self, i: usize) -> [f32; 4] {
+        [self[i].lod_min, self[i].lod_low, self[i].lod_high, self[i].lod_max]
+    }
+    fn orientation(&self, i: usize) -> [f32; 4] {
+        self[i].quaternion
+    }
+}
+
 fn convert(input_filename: &str, output_filename: &str, meta_filename: &str) {
     let mut splats = if input_filename.ends_with(".ply") {
         read_ply(input_filename)
@@ -201,42 +224,40 @@ fn convert(input_filename: &str, output_filename: &str, meta_filename: &str) {
     }
 
     if output_filename.ends_with(".rad") {
-        println!("Encoding RAD");
-        let (payloads, bytes): (Vec<rad::RadPayload>, Vec<Vec<u8>>) = [
-            rad::RadPayload::new_center(0, splats.len(), |i| splats[i].center),
-            rad::RadPayload::new_alpha(0, splats.len(), |i| splats[i].opacity),
-            rad::RadPayload::new_rgb(0, splats.len(), |i| splats[i].color),
-            rad::RadPayload::new_scales(0, splats.len(), |i| splats[i].scales),
-            rad::RadPayload::new_orientation(0, splats.len(), |i| splats[i].quaternion),
-            rad::RadPayload::new_lod_scales(0, splats.len(), |i| [splats[i].lod_min, splats[i].lod_low, splats[i].lod_high, splats[i].lod_max]),
-        ].into_iter().unzip();
-
-        for (i, bytes) in bytes.iter().enumerate() {
-            println!("Payload {} size: {}", i, bytes.len());
+        println!("Sorting in Morton order");
+        let start_time = std::time::Instant::now();
+        let mut start = 0;
+        for &(_, end) in meta.cuts.iter() {
+            splats[start..end as usize].sort_by_key(|splat| rad::morton_coord_to_index(splat.center));
+            start = end as usize;
         }
+        // splats.sort_by_key(|splat| rad::morton_coord_to_index(splat.center));
+        let sort_duration = start_time.elapsed();
+        println!("Sorting took {:?}", sort_duration);
 
-        let meta = rad::RadMeta {
-            version: 1,
+        println!("Encoding RAD");
+        let rad_meta = rad::RadMeta {
             ty: rad::RadType::Gsplat,
             count: splats.len() as u32,
             antialias: Some(true),
-            payloads,
             lodMeta: Some(rad::RadLodMeta {
                 pixelSizes: meta.cuts.iter().map(|(px, n)| (*px, *n as u32)).collect(),
                 boundCenter: meta.bound_center,
                 boundRadius: meta.bound_radius,
             }),
+            ..Default::default()
         };
-        let rad_filename = output_filename.replace(".ply", ".rad");
-        let rad_file = rad::RadFile::new(&meta, bytes).unwrap();
+        let rad_file = rad::RadFile::new_from_gsplats(&rad_meta, &splats, None, None).unwrap();
 
         println!("Writing RAD");
+        let rad_filename = output_filename.replace(".ply", ".rad");
         let mut writer = BufWriter::new(std::fs::File::create(rad_filename).unwrap());
         rad_file.write_to(&mut writer).unwrap();
         println!("RAD written");
     }
 }
 
+#[allow(unused)]
 fn convert_dir(input_dir: &str, output_dir: &str) {
     let files = std::fs::read_dir(input_dir).unwrap();
     for file in files {

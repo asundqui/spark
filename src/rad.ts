@@ -1,4 +1,4 @@
-import { Gunzip, gunzipSync } from "fflate";
+import { gunzipSync, gzipSync } from "fflate";
 import * as THREE from "three";
 import type { SplatEncoding } from "./PackedSplats";
 import {
@@ -13,6 +13,7 @@ import {
   setPackedSplatQuat,
   setPackedSplatRgb,
   setPackedSplatScales,
+  toHalf,
 } from "./utils";
 
 export type RadMeta = {
@@ -417,4 +418,326 @@ export function unpackRad(
     },
   });
   return { packedArray, numSplats, extra };
+}
+
+function u16ByteOrder(items: Uint16Array): Uint8Array {
+  const buffer = new Uint8Array(items.length * 2);
+  for (let i = 0; i < items.length; ++i) {
+    const u = items[i];
+    buffer[i] = u & 0xff;
+    buffer[i + items.length] = (u >>> 8) & 0xff;
+  }
+  return buffer;
+}
+
+function toRgb8(
+  base: number,
+  count: number,
+  get: (i: number, out: [number, number, number]) => void,
+  min = 0,
+  max = 1,
+): Uint8Array {
+  const buf = new Uint8Array(3 * count);
+  const v: [number, number, number] = [0, 0, 0];
+  for (let i = 0; i < count; ++i) {
+    get(base + i, v);
+    const rn = Math.round(
+      Math.min(255, Math.max(0, ((v[0] - min) / (max - min)) * 255)),
+    );
+    const gn = Math.round(
+      Math.min(255, Math.max(0, ((v[1] - min) / (max - min)) * 255)),
+    );
+    const bn = Math.round(
+      Math.min(255, Math.max(0, ((v[2] - min) / (max - min)) * 255)),
+    );
+    buf[i] = rn;
+    buf[i + count] = gn;
+    buf[i + 2 * count] = bn;
+  }
+  return buf;
+}
+
+const MIN_LOG_SCALE = -50.0;
+
+function toLogUint8(
+  base: number,
+  count: number,
+  components: number,
+  get: (i: number, out: number[]) => void,
+  min = -12,
+  max = 9,
+): Uint8Array {
+  const buf = new Uint8Array(components * count);
+  const minScale = Math.exp(MIN_LOG_SCALE);
+  const v = new Array<number>(components).fill(0);
+  for (let i = 0; i < count; ++i) {
+    get(base + i, v);
+    for (let d = 0; d < components; ++d) {
+      const s = Math.abs(v[d]);
+      buf[i + d * count] =
+        s < minScale
+          ? 0
+          : Math.min(
+              255,
+              Math.max(
+                1,
+                Math.round(((Math.log(s) - min) / (max - min)) * 254) + 1,
+              ),
+            );
+    }
+  }
+  return buf;
+}
+
+function quatXyzwToOct88R8(
+  qx: number,
+  qy: number,
+  qz: number,
+  qw: number,
+  out: [number, number, number],
+): void {
+  const qlen = Math.hypot(qx, qy, qz, qw);
+  const nx = (qw < 0 ? -qx : qx) / qlen;
+  const ny = (qw < 0 ? -qy : qy) / qlen;
+  const nz = (qw < 0 ? -qz : qz) / qlen;
+  const nw = (qw < 0 ? -qw : qw) / qlen;
+  const theta = 2 * Math.acos(nw);
+  const xyzNorm = Math.hypot(nx, ny, nz);
+  const ax = xyzNorm < 1e-6 ? 1 : nx / xyzNorm;
+  const ay = xyzNorm < 1e-6 ? 0 : ny / xyzNorm;
+  const az = xyzNorm < 1e-6 ? 0 : nz / xyzNorm;
+  const sum = Math.abs(ax) + Math.abs(ay) + Math.abs(az);
+  let px = ax / sum;
+  let py = ay / sum;
+  if (az < 0) {
+    const t = px;
+    px = (1 - Math.abs(py)) * (px >= 0 ? 1 : -1);
+    py = (1 - Math.abs(t)) * (py >= 0 ? 1 : -1);
+  }
+  const u = Math.round(Math.min(255, Math.max(0, (px * 0.5 + 0.5) * 255)));
+  const v = Math.round(Math.min(255, Math.max(0, (py * 0.5 + 0.5) * 255)));
+  const r = Math.round(Math.min(255, Math.max(0, (theta * 255) / Math.PI)));
+  out[0] = u;
+  out[1] = v;
+  out[2] = r;
+}
+
+export class RadWriter {
+  static readonly RAD_MAGIC = 0x30444152;
+
+  meta: RadMeta;
+  payloads: { meta: RadPayload; bytes: Uint8Array }[];
+
+  constructor(meta: RadMeta) {
+    this.meta = meta;
+    this.payloads = [];
+  }
+
+  addCenterPayload(
+    base: number,
+    count: number,
+    get: (i: number, out: [number, number, number]) => void,
+  ) {
+    const halves = new Uint16Array(3 * count);
+    const v: [number, number, number] = [0, 0, 0];
+    for (let i = 0; i < count; ++i) {
+      get(base + i, v);
+      halves[i] = toHalf(v[0]);
+      halves[i + count] = toHalf(v[1]);
+      halves[i + 2 * count] = toHalf(v[2]);
+    }
+    const raw = u16ByteOrder(halves);
+    const bytes = gzipSync(raw);
+    const meta: RadPayload = {
+      bytes: bytes.length,
+      property: RadProperty.Center,
+      encoding: RadEncoding.Float16ByteOrder,
+      base,
+      count,
+      components: 3,
+      compression: RadCompression.Gzip,
+    };
+    this.payloads.push({ meta, bytes });
+    return this;
+  }
+
+  addAlphaPayload(base: number, count: number, get: (i: number) => number) {
+    const halves = new Uint16Array(count);
+    for (let i = 0; i < count; ++i) halves[i] = toHalf(get(base + i));
+    const raw = u16ByteOrder(halves);
+    const bytes = gzipSync(raw);
+    const meta: RadPayload = {
+      bytes: bytes.length,
+      property: RadProperty.Alpha,
+      encoding: RadEncoding.Float16ByteOrder,
+      base,
+      count,
+      components: 1,
+      compression: RadCompression.Gzip,
+    };
+    this.payloads.push({ meta, bytes });
+    return this;
+  }
+
+  addRgbPayload(
+    base: number,
+    count: number,
+    get: (i: number, out: [number, number, number]) => void,
+    min = 0,
+    max = 1,
+  ) {
+    const raw = toRgb8(base, count, get, min, max);
+    const bytes = gzipSync(raw);
+    const meta: RadPayload = {
+      bytes: bytes.length,
+      property: RadProperty.Rgb,
+      encoding: RadEncoding.Uint8,
+      base,
+      count,
+      components: 3,
+      compression: RadCompression.Gzip,
+      mins: [min],
+      maxs: [max],
+    };
+    this.payloads.push({ meta, bytes });
+    return this;
+  }
+
+  addScalesPayload(
+    base: number,
+    count: number,
+    get: (i: number, out: [number, number, number]) => void,
+    min = -12,
+    max = 9,
+  ) {
+    const raw = toLogUint8(
+      base,
+      count,
+      3,
+      (i, out) => get(i, out as [number, number, number]),
+      min,
+      max,
+    );
+    const bytes = gzipSync(raw);
+    const meta: RadPayload = {
+      bytes: bytes.length,
+      property: RadProperty.Scales,
+      encoding: RadEncoding.LogUint8,
+      base,
+      count,
+      components: 3,
+      compression: RadCompression.Gzip,
+      mins: [min],
+      maxs: [max],
+    };
+    this.payloads.push({ meta, bytes });
+    return this;
+  }
+
+  addLodScalesPayload(
+    base: number,
+    count: number,
+    get: (i: number, out: [number, number, number, number]) => void,
+    min = -12,
+    max = 9,
+  ) {
+    const raw = toLogUint8(
+      base,
+      count,
+      4,
+      (i, out) => get(i, out as [number, number, number, number]),
+      min,
+      max,
+    );
+    const bytes = gzipSync(raw);
+    const meta: RadPayload = {
+      bytes: bytes.length,
+      property: RadProperty.LodScales,
+      encoding: RadEncoding.LogUint8,
+      base,
+      count,
+      components: 4,
+      compression: RadCompression.Gzip,
+      mins: [min],
+      maxs: [max],
+    };
+    this.payloads.push({ meta, bytes });
+    return this;
+  }
+
+  addOrientationPayload(
+    base: number,
+    count: number,
+    get: (i: number, out: [number, number, number, number]) => void,
+  ) {
+    const raw = new Uint8Array(3 * count);
+    const q: [number, number, number, number] = [0, 0, 0, 1];
+    const oct: [number, number, number] = [0, 0, 0];
+    for (let i = 0; i < count; ++i) {
+      get(base + i, q);
+      quatXyzwToOct88R8(q[0], q[1], q[2], q[3], oct);
+      const i3 = i * 3;
+      raw[i3] = oct[0];
+      raw[i3 + 1] = oct[1];
+      raw[i3 + 2] = oct[2];
+    }
+    const bytes = gzipSync(raw);
+    const meta: RadPayload = {
+      bytes: bytes.length,
+      property: RadProperty.Orientation,
+      encoding: RadEncoding.Oct88R8,
+      base,
+      count,
+      compression: RadCompression.Gzip,
+    };
+    this.payloads.push({ meta, bytes });
+    return this;
+  }
+
+  finalize(): Uint8Array {
+    const metaCopy: RadMeta = {
+      ...this.meta,
+      payloads: this.payloads.map((p) => ({ ...p.meta })),
+    };
+    const metaBytes = new TextEncoder().encode(
+      JSON.stringify(metaCopy, null, 2),
+    );
+    const metaSize = metaBytes.length;
+    const header = new Uint8Array(8);
+    const headerView = new DataView(header.buffer);
+    headerView.setUint32(0, RadWriter.RAD_MAGIC, true);
+    headerView.setUint32(4, metaSize, true);
+
+    const parts: Uint8Array[] = [
+      header,
+      metaBytes,
+      new Uint8Array((8 - (metaSize & 7)) & 7),
+    ];
+
+    for (const p of this.payloads) {
+      const sizeBuf = new Uint8Array(8);
+      new DataView(sizeBuf.buffer).setBigUint64(
+        0,
+        BigInt(p.bytes.length),
+        true,
+      );
+      parts.push(
+        sizeBuf,
+        p.bytes,
+        new Uint8Array((8 - (p.bytes.length & 7)) & 7),
+      );
+    }
+    const tail = new Uint8Array(8);
+    parts.push(tail);
+
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.length;
+    }
+    return out;
+  }
 }

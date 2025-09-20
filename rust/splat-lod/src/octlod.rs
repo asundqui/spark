@@ -11,8 +11,8 @@ use crate::{lod::{Gsplat, SymMat3}, LodMeta};
 const MIN_FACTOR: f32 = 2.0;
 const DISAPPEAR_FACTOR: f32 = 2.0;
 const CHUNK_SPLATS: usize = 100000;
-const MAX_CHUNK_SPLATS: usize = 150000;
-const CHUNK_LEVELS: usize = 1;
+// const MAX_CHUNK_SPLATS: usize = 150000;
+// const CHUNK_LEVELS: usize = 1;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct MergePriority(Reverse<OrderedFloat<f32>>);

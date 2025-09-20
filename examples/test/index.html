@@ -144,13 +144,13 @@
       gui.add(test, "enableLod").name("Enable LoD 0").onChange(() => {
         test.updateGenerator();
       }).listen();
-      gui.add(test, "lodScale", 0.1, 30.0, 0.1).name("LoD pixel size").onChange(() => {
+      gui.add(test, "lodScale", 1.0, 30.0, 0.1).name("LoD pixel size").onChange(() => {
         renderEnabled = performance.now();
       }).listen();
 
       // const splats = await loadLodSplats(`${URL_BASE}/test-butterfly.ply`);
       // const splats = await loadLodSplats(`${URL_BASE}/tasty/castle_grounds.rad`);
-      const splats = await loadLodSplats(`${URL_BASE}/samples/8dd44e53-54fa-4133-a42a-ac01b4c662f3_ceramic.rad`);
+      const splats = await loadLodSplats(`${URL_BASE}/samples/9144d97a-6c97-4093-b002-855bebb9a09e_ceramic.rad`);
       splats.position.set(0, 0.0, 0.0);
       splats.quaternion.set(1, 0, 0, 0);
       scene.add(splats);
@@ -160,7 +160,7 @@
       gui.add(splats, "enableLod").name("Enable LoD 1").onChange(() => {
         splats.updateGenerator();
       }).listen();
-      gui.add(splats, "lodScale", 0.1, 30.0, 0.1).name("LoD pixel size 1").onChange(() => {
+      gui.add(splats, "lodScale", 1.0, 30.0, 0.1).name("LoD pixel size 1").onChange(() => {
         test.lodScale = splats.lodScale;
         renderEnabled = performance.now();
       }).listen();
@@ -171,7 +171,7 @@
 
       const splats2 = await loadLodSplats(`${URL_BASE}/test-furry.rad`);
       splats2.lodScale = 20.0;
-      splats2.position.set(0.5, -0.5, -2.0);
+      splats2.position.set(0.5, 0.0, -2.0);
       splats2.scale.setScalar(0.25);
       scene.add(splats2);
       
@@ -179,7 +179,7 @@
       gui.add(splats2, "enableLod").name("Enable LoD 2").onChange(() => {
         splats2.updateGenerator();
       }).listen();
-      gui.add(splats2, "lodScale", 0.1, 30.0, 0.1).name("LoD pixel size 2");
+      gui.add(splats2, "lodScale", 1.0, 30.0, 0.1).name("LoD pixel size 2");
 
       gui.add({ openCv: true }, "openCv").name("OpenCV coordinates").onChange((value) => {
         if (value) {
