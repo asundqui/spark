@@ -1365,7 +1365,7 @@ export function encodeQuatOctXy88R8(
   const theta = 2 * Math.acos(qnw);
   // Recover the rotation axis (default to (1,0,0) for near-zero rotation)
   const xyz_norm = Math.sqrt(qnx * qnx + qny * qny + qnz * qnz);
-  const axisX = xyz_norm < 1e-6 ? 0 : qnx / xyz_norm;
+  const axisX = xyz_norm < 1e-6 ? 1 : qnx / xyz_norm;
   const axisY = xyz_norm < 1e-6 ? 0 : qny / xyz_norm;
   const axisZ = xyz_norm < 1e-6 ? 0 : qnz / xyz_norm;
 
@@ -1409,7 +1409,7 @@ export function encodeQuatOctXy1010R12(
   const theta = 2 * Math.acos(qnw);
   // Recover the rotation axis (default to (1,0,0) for near-zero rotation)
   const xyz_norm = Math.sqrt(qnx * qnx + qny * qny + qnz * qnz);
-  const axisX = xyz_norm < 1e-6 ? 0 : qnx / xyz_norm;
+  const axisX = xyz_norm < 1e-6 ? 1 : qnx / xyz_norm;
   const axisY = xyz_norm < 1e-6 ? 0 : qny / xyz_norm;
   const axisZ = xyz_norm < 1e-6 ? 0 : qnz / xyz_norm;
 

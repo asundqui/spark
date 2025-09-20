@@ -6,6 +6,7 @@ import { WASM_SPLAT_SORT } from "./defines";
 import { unpackKsplat } from "./ksplat";
 import { unpackPcSogs, unpackPcSogsZip } from "./pcsogs";
 import { PlyReader } from "./ply";
+import { unpackRad } from "./rad";
 import { SpzReader, transcodeSpz } from "./spz";
 import {
   computeMaxSplats,
@@ -125,6 +126,23 @@ async function onMessage(event: MessageEvent) {
           splatEncoding: SplatEncoding;
         };
         const decoded = await unpackPcSogsZip(fileBytes, splatEncoding);
+        result = {
+          id,
+          numSplats: decoded.numSplats,
+          packedArray: decoded.packedArray,
+          extra: decoded.extra,
+          splatEncoding,
+        };
+        break;
+      }
+      case "decodeRad": {
+        const { fileBytes, splatEncoding } = args as {
+          fileBytes: Uint8Array;
+          splatEncoding: SplatEncoding;
+        };
+        // const start = performance.now();
+        const decoded = unpackRad(fileBytes, splatEncoding);
+        // console.log("Worker decodeRad time", performance.now() - start);
         result = {
           id,
           numSplats: decoded.numSplats,

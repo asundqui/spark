@@ -4,21 +4,22 @@ mod ply;
 mod spz;
 mod lod;
 mod octlod;
+mod rad;
 
 use ahash::AHashMap;
 use lod::Gsplat;
 use serde::Serialize;
 const SH_C0: f32 = 0.28209479177387814;
 
-// const INPUT_FILENAME: &str = "../../examples/assets/splats/butterfly-ai.ply";
-const INPUT_FILENAME: &str = "../../examples/assets/splats/toad.ply";
+const INPUT_FILENAME: &str = "../../examples/assets/splats/butterfly-ai.ply";
+// const INPUT_FILENAME: &str = "../../examples/assets/splats/toad.ply";
 // const INPUT_FILENAME: &str = "/Users/asundqui/Downloads/combined_sparse_5m_cropped.ply";
 // const INPUT_FILENAME: &str = "sunken.spz";
 // const INPUT_FILENAME: &str = "../../examples/assets/splats/test_input.ply";
 // const INPUT_FILENAME: &str = "/Users/asundqui/Downloads/hog_20m.ply";
 // const INPUT_FILENAME: &str = "/Users/asundqui/Downloads/furry_mcmc_250K_SH2.ply";
 // const INPUT_FILENAME: &str = "../../examples/assets/splats/32e9c3f3b1f97154-flux-pro.spz";
-const OUTPUT_FILENAME: &str = "../../examples/assets/splats/test.ply";
+const OUTPUT_FILENAME: &str = "../../examples/assets/splats/test.rad";
 const META_FILENAME: &str = "../../examples/assets/splats/test.meta.json";
 
 fn write_f32_slice(file: &mut BufWriter<std::fs::File>, values: &[f32]) -> std::io::Result<()> {
@@ -191,11 +192,49 @@ fn convert(input_filename: &str, output_filename: &str, meta_filename: &str) {
 
     let meta = octlod::create_octree_lod(&mut splats);
 
-    write_ply(&splats, output_filename);
+    if output_filename.ends_with(".ply") {
+        write_ply(&splats, output_filename);
 
-    // Encode meta to JSON
-    let meta_json = serde_json::to_string(&meta).unwrap();
-    write_txt(&meta_json, meta_filename);
+        // Encode meta to JSON
+        let meta_json = serde_json::to_string(&meta).unwrap();
+        write_txt(&meta_json, meta_filename);
+    }
+
+    if output_filename.ends_with(".rad") {
+        println!("Encoding RAD");
+        let (payloads, bytes): (Vec<rad::RadPayload>, Vec<Vec<u8>>) = [
+            rad::RadPayload::new_center(0, splats.len(), |i| splats[i].center),
+            rad::RadPayload::new_alpha(0, splats.len(), |i| splats[i].opacity),
+            rad::RadPayload::new_rgb(0, splats.len(), |i| splats[i].color),
+            rad::RadPayload::new_scales(0, splats.len(), |i| splats[i].scales),
+            rad::RadPayload::new_orientation(0, splats.len(), |i| splats[i].quaternion),
+            rad::RadPayload::new_lod_scales(0, splats.len(), |i| [splats[i].lod_min, splats[i].lod_low, splats[i].lod_high, splats[i].lod_max]),
+        ].into_iter().unzip();
+
+        for (i, bytes) in bytes.iter().enumerate() {
+            println!("Payload {} size: {}", i, bytes.len());
+        }
+
+        let meta = rad::RadMeta {
+            version: 1,
+            ty: rad::RadType::Gsplat,
+            count: splats.len() as u32,
+            antialias: Some(true),
+            payloads,
+            lodMeta: Some(rad::RadLodMeta {
+                pixelSizes: meta.cuts.iter().map(|(px, n)| (*px, *n as u32)).collect(),
+                boundCenter: meta.bound_center,
+                boundRadius: meta.bound_radius,
+            }),
+        };
+        let rad_filename = output_filename.replace(".ply", ".rad");
+        let rad_file = rad::RadFile::new(&meta, bytes).unwrap();
+
+        println!("Writing RAD");
+        let mut writer = BufWriter::new(std::fs::File::create(rad_filename).unwrap());
+        rad_file.write_to(&mut writer).unwrap();
+        println!("RAD written");
+    }
 }
 
 fn convert_dir(input_dir: &str, output_dir: &str) {
@@ -203,11 +242,11 @@ fn convert_dir(input_dir: &str, output_dir: &str) {
     for file in files {
         let file = file.unwrap();
         let path = file.path();
-        if path.extension().unwrap() == "spz" {
+        if path.extension().unwrap() == "spz" || path.extension().unwrap() == "ply" {
             // Get filename without extension
             let name = path.file_stem().unwrap().to_str().unwrap();
             // Create output filename with PLY
-            let output_filename = format!("{}/{}.ply", output_dir, name);
+            let output_filename = format!("{}/{}.rad", output_dir, name);
             let meta_filename = format!("{}/{}.meta.json", output_dir, name);
             println!("--------------------------------");
             println!("Converting {} to {} and {}", path.to_str().unwrap(), output_filename, meta_filename);
@@ -221,6 +260,10 @@ fn main() {
     // // Read through directory and find all *.spz files: in /Users/asundqui/tasty/tasty_spz/
     // let source = "/Users/asundqui/tasty/tasty_spz/";
     // convert_dir(source, "../../examples/assets/splats/tasty/");
+
+    // // Read through directory and find all *.ply files: in /Users/asundqui/spark/samples/
+    // let source = "/Users/asundqui/spark/samples/";
+    // convert_dir(source, "../../examples/assets/splats/samples/");
 
     convert(INPUT_FILENAME, OUTPUT_FILENAME, META_FILENAME);
 }

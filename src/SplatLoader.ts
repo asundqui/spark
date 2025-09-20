@@ -7,7 +7,6 @@ import {
   type SplatEncoding,
 } from "./PackedSplats";
 import { SplatMesh } from "./SplatMesh";
-import { PlyReader } from "./ply";
 import { withWorker } from "./splatWorker";
 import { computeMaxSplats, decompressPartialGzip } from "./utils";
 
@@ -226,6 +225,7 @@ export enum SplatFileType {
   KSPLAT = "ksplat",
   PCSOGS = "pcsogs",
   PCSOGSZIP = "pcsogszip",
+  RAD = "rad",
 }
 
 export function getSplatFileType(
@@ -252,6 +252,10 @@ export function getSplatFileType(
     }
     // Unknown PKZip file type
     return undefined;
+  }
+  if (view.getUint32(0, true) === 0x30444152) {
+    // RAD0 file
+    return SplatFileType.RAD;
   }
   // Unknown file type
   return undefined;
@@ -287,6 +291,9 @@ export function getSplatFileTypeFromPath(
   }
   if (extension === "ksplat") {
     return SplatFileType.KSPLAT;
+  }
+  if (extension === "rad") {
+    return SplatFileType.RAD;
   }
   return undefined;
 }
@@ -479,6 +486,14 @@ export async function unpackSplats({
     case SplatFileType.PCSOGSZIP: {
       return await withWorker(async (worker) => {
         return (await worker.call("decodePcSogsZip", {
+          fileBytes,
+          splatEncoding,
+        })) as DecodeResult;
+      });
+    }
+    case SplatFileType.RAD: {
+      return await withWorker(async (worker) => {
+        return (await worker.call("decodeRad", {
           fileBytes,
           splatEncoding,
         })) as DecodeResult;

@@ -46,160 +46,186 @@
     const URL_BASE = "/examples/assets/splats";
     // const URL_BASE = ".";
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 2000);
-    camera.position.set(0, 0, 1);
-    const renderer = new THREE.WebGLRenderer();
-    // renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    const canvas = renderer.domElement;
-    canvas.style.position = "absolute";
-    canvas.style.width = "100%";
-    canvas.style.height = "100%";
-    document.body.appendChild(canvas);
+    async function main() {
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 2000);
+      camera.position.set(0, 0, 0);
+      const renderer = new THREE.WebGLRenderer();
+      // renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      const canvas = renderer.domElement;
+      canvas.style.position = "absolute";
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      document.body.appendChild(canvas);
 
-    function handleResize() {
-      const width = canvas.clientWidth;
-      const height = canvas.clientHeight;
-      renderer.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    }
+      function handleResize() {
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        renderer.setSize(width, height, false);
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+      }
 
-    handleResize();
-    window.addEventListener("resize", handleResize);
+      handleResize();
+      window.addEventListener("resize", handleResize);
 
-    const stats = new Stats();
-    document.body.appendChild(stats.dom);
+      const stats = new Stats();
+      document.body.appendChild(stats.dom);
 
-    // Lower the splat rendering width to sqrt(5) std devs for more performance
-    const spark = new NewSparkRenderer({
-      renderer,
-      // splatEncoding: { ...DEFAULT_EXT_SPLAT_ENCODING },
-      // minPixelRadius: 1.6,
-      // maxStdDev: 5.0,
-      // view: { sort32: true },
-    });
-    scene.add(spark);
+      // Lower the splat rendering width to sqrt(5) std devs for more performance
+      const spark = new NewSparkRenderer({
+        renderer,
+        // splatEncoding: { ...DEFAULT_EXT_SPLAT_ENCODING },
+        // minPixelRadius: 1.6,
+        // maxStdDev: 5.0,
+        // view: { sort32: true },
+      });
+      scene.add(spark);
 
-    PackedSplats.defaultExtended = true;
+      PackedSplats.defaultExtended = true;
 
-    // const grid = new SplatMesh({
-    //   constructSplats: (splats) => constructGrid({
-    //     splats,
-    //     extents: new THREE.Box3(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10)),
-    //   }),
-    // });
-    // scene.add(grid);
+      // const grid = new SplatMesh({
+      //   constructSplats: (splats) => constructGrid({
+      //     splats,
+      //     extents: new THREE.Box3(new THREE.Vector3(-10, -10, -10), new THREE.Vector3(10, 10, 10)),
+      //   }),
+      // });
+      // scene.add(grid);
 
-    const gui = new GUI({ title: "Settings" });
-    
-    const enableRender = { value: true };
-    let renderEnabled = performance.now();
-    gui.add(enableRender, "value").name("Enable render").onChange((enabled) => {
-      renderEnabled = enabled ? performance.now() : null;
-    }).listen();
+      const gui = new GUI({ title: "Settings" });
+      
+      const enableRender = { value: true };
+      let renderEnabled = performance.now();
+      gui.add(enableRender, "value").name("Enable render").onChange((enabled) => {
+        renderEnabled = enabled ? performance.now() : null;
+      }).listen();
 
-    gui.add(spark, "autoUpdate").name("Auto update").listen();
+      gui.add(spark, "autoUpdate").name("Auto update").listen();
 
-    async function loadLodSplats(url) {
-      const metaUrl = url.replace(".ply", ".meta.json");
-      const meta = await fetch(metaUrl).then(response => response.json());
-      const splats = new SplatMesh({
-        url,
-        onLoad: async (splats) => {
-          splats.lodMeta = {
-            cuts: meta.cuts,
-            boundCenter: new THREE.Vector3(...meta.bound_center),
-            boundRadius: meta.bound_radius,
-          };
-          splats.enableLod = true;
-          splats.updateGenerator();
+      async function loadLodSplats(url) {
+        const packedSplats = new PackedSplats({ url });
+
+        let meta = null;
+        if (url.endsWith(".ply")) {
+          const metaUrl = url.replace(".ply", ".meta.json");
+          meta = await fetch(metaUrl).then(response => response.json());
+        }
+
+        const splats = new SplatMesh({
+          onLoad: async (splats) => {
+            if (meta) {
+              splats.packedSplats.extra.lodMeta = {
+                pixelSizes: meta.cuts,
+                boundCenter: new THREE.Vector3(...meta.bound_center),
+                boundRadius: meta.bound_radius,
+              };
+            }
+            if (false) {
+              splats.chunks = [
+                { packedSplats },
+              ];
+            } else {
+              splats.packedSplats = packedSplats;
+            }
+            splats.enableLod = true;
+            splats.updateGenerator();
+          }
+        });
+        return splats;
+      }
+
+      const test = await loadLodSplats(`${URL_BASE}/test-butterfly.rad`);
+      test.quaternion.set(1, 0, 0, 0);
+      test.scale.setScalar(0.75);
+      test.position.set(-0.25, 0.0, -1.0);
+      scene.add(test);
+
+      gui.add(test, "enableLod").name("Enable LoD 0").onChange(() => {
+        test.updateGenerator();
+      }).listen();
+      gui.add(test, "lodScale", 0.1, 30.0, 0.1).name("LoD pixel size").onChange(() => {
+        renderEnabled = performance.now();
+      }).listen();
+
+      // const splats = await loadLodSplats(`${URL_BASE}/test-butterfly.ply`);
+      // const splats = await loadLodSplats(`${URL_BASE}/tasty/castle_grounds.rad`);
+      const splats = await loadLodSplats(`${URL_BASE}/samples/8dd44e53-54fa-4133-a42a-ac01b4c662f3_ceramic.rad`);
+      splats.position.set(0, 0.0, 0.0);
+      splats.quaternion.set(1, 0, 0, 0);
+      scene.add(splats);
+
+      splats.enableLod = true;
+      splats.updateGenerator();
+      gui.add(splats, "enableLod").name("Enable LoD 1").onChange(() => {
+        splats.updateGenerator();
+      }).listen();
+      gui.add(splats, "lodScale", 0.1, 30.0, 0.1).name("LoD pixel size 1").onChange(() => {
+        test.lodScale = splats.lodScale;
+        renderEnabled = performance.now();
+      }).listen();
+      gui.add(splats, "lodExponent", 0.0, 2.0, 0.01).name("LoD exponent").onChange(() => {
+        test.lodExponent = splats.lodExponent;
+        renderEnabled = performance.now();
+      }).listen();
+
+      const splats2 = await loadLodSplats(`${URL_BASE}/test-furry.rad`);
+      splats2.lodScale = 20.0;
+      splats2.position.set(0.5, -0.5, -2.0);
+      splats2.scale.setScalar(0.25);
+      scene.add(splats2);
+      
+      splats2.enableLod = true;
+      gui.add(splats2, "enableLod").name("Enable LoD 2").onChange(() => {
+        splats2.updateGenerator();
+      }).listen();
+      gui.add(splats2, "lodScale", 0.1, 30.0, 0.1).name("LoD pixel size 2");
+
+      gui.add({ openCv: true }, "openCv").name("OpenCV coordinates").onChange((value) => {
+        if (value) {
+          splats.quaternion.set(1, 0, 0, 0);
+        } else {
+          splats.quaternion.set(0, 0, 0, 1);
         }
       });
-      return splats;
+
+      const controls = new SparkControls({ canvas: renderer.domElement });
+      let lastTime = null;
+      let lastPosition = new THREE.Vector3();
+      let renderCount = 0;
+
+      renderer.setAnimationLoop(function animate(time, xrFrame) {
+        const deltaTime = (time - (lastTime ?? time)) / 1000;
+        lastTime = time;
+        controls.update(camera);
+        
+        if (++renderCount == 1) {
+          renderCount = 0;
+          stats.begin();
+          if (enableRender.value) {
+            test.rotation.y += 0.2 * deltaTime;
+            splats2.rotation.x += 0.13 * deltaTime;
+            renderer.render(scene, camera);
+          }
+          stats.end();
+        }
+
+        if (camera.position.distanceTo(lastPosition) > 0.001) {
+          renderEnabled = performance.now();
+          enableRender.value = true;
+          lastPosition.copy(camera.position);
+        }
+        if (renderEnabled) {
+          if (performance.now() - renderEnabled > TIMEOUT_MS) {
+            renderEnabled = null;
+            enableRender.value = false;
+            console.log("Render disabled due to inactivity");
+          }
+        }
+      });
     }
 
-    const test = await loadLodSplats(`${URL_BASE}/test-toad.ply`);
-    test.quaternion.set(1, 0, 0, 0);
-    test.scale.setScalar(0.75);
-    test.position.set(-0.25, 0.0, 0.0);
-    scene.add(test);
-
-    gui.add(test, "enableLod").name("Enable LoD 0").onChange(() => {
-      test.updateGenerator();
-    }).listen();
-    gui.add(test, "lodScale", 0.1, 100.0, 0.1).name("LoD pixel size").onChange(() => {
-      renderEnabled = performance.now();
-    }).listen();
-
-    const splats = await loadLodSplats(`${URL_BASE}/test-butterfly.ply`);
-    splats.position.set(0, 0.0, -0.5);
-    splats.quaternion.set(1, 0, 0, 0);
-    scene.add(splats);
-
-    splats.enableLod = true;
-    splats.lodScale = 20.0;
-    splats.updateGenerator();
-    gui.add(splats, "enableLod").name("Enable LoD 1").onChange(() => {
-      splats.updateGenerator();
-    }).listen();
-    gui.add(splats, "lodScale", 0.1, 100.0, 0.1).name("LoD pixel size 1").onChange(() => {
-      renderEnabled = performance.now();
-    }).listen();
-
-    const splats2 = await loadLodSplats(`${URL_BASE}/test-furry.ply`);
-    splats2.position.set(0.5, 0.0, -1.0);
-    splats2.scale.setScalar(0.25);
-    scene.add(splats2);
-    
-    splats2.enableLod = true;
-    gui.add(splats2, "enableLod").name("Enable LoD 2").onChange(() => {
-      splats2.updateGenerator();
-    }).listen();
-    gui.add(splats2, "lodScale", 0.1, 100.0, 0.1).name("LoD pixel size 2");
-
-    gui.add({ openCv: true }, "openCv").name("OpenCV coordinates").onChange((value) => {
-      if (value) {
-        splats.quaternion.set(1, 0, 0, 0);
-      } else {
-        splats.quaternion.set(0, 0, 0, 1);
-      }
-    });
-
-    const controls = new SparkControls({ canvas: renderer.domElement });
-    let lastTime = null;
-    let lastPosition = new THREE.Vector3();
-    let renderCount = 0;
-
-    renderer.setAnimationLoop(function animate(time, xrFrame) {
-      const deltaTime = (time - (lastTime ?? time)) / 1000;
-      lastTime = time;
-      controls.update(camera);
-      
-      if (++renderCount == 1) {
-        renderCount = 0;
-        stats.begin();
-        if (enableRender.value) {
-          // splats.rotation.y += 0.2 * deltaTime;
-          renderer.render(scene, camera);
-        }
-        stats.end();
-      }
-
-      if (camera.position.distanceTo(lastPosition) > 0.001) {
-        renderEnabled = performance.now();
-        enableRender.value = true;
-        lastPosition.copy(camera.position);
-      }
-      if (renderEnabled) {
-        if (performance.now() - renderEnabled > TIMEOUT_MS) {
-          renderEnabled = null;
-          enableRender.value = false;
-          console.log("Render disabled due to inactivity");
-        }
-      }
-    });
+    main().catch(console.error);
   </script>
 </body>
 

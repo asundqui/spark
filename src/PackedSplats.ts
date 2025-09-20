@@ -107,7 +107,8 @@ export type PackedSplatsOptions = {
   // Callback function to programmatically create splats at initialization.
   // (default: undefined)
   construct?: (splats: PackedSplats) => Promise<void> | void;
-  // Additional splat data, such as spherical harmonics components (sh1, sh2, sh3). (default: {})
+  // Additional splat data, such as spherical harmonics components (sh1, sh2, sh3)
+  // and LOD metadata. (default: {})
   extra?: Record<string, unknown>;
   // Override the default splat encoding ranges for the PackedSplats.
   // (default: undefined)

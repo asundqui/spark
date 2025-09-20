@@ -130,6 +130,7 @@ export type SplatMeshContext = {
   enableLod: DynoBool;
   pixelScale: DynoFloat;
   minPixelSize: DynoFloat;
+  lodExponent: DynoFloat;
 };
 
 export class SplatMesh extends SplatGenerator {
@@ -189,8 +190,8 @@ export class SplatMesh extends SplatGenerator {
   enableLod = false;
   // LoD scale adjustment factor (default: 1.0)
   lodScale = 1.0;
-  // LoD tree and bounding metadata
-  lodMeta: LodMeta | null = null;
+  // LoD distance exponent (default: 1.0)
+  lodExponent = 1.0;
   // Multi-splat chunks
   chunks: SplatChunk[] | null = null;
 
@@ -215,6 +216,7 @@ export class SplatMesh extends SplatGenerator {
       viewToObject: new SplatTransformer(),
       pixelScale: new DynoFloat({ value: 0 }),
       minPixelSize: new DynoFloat({ value: 0 }),
+      lodExponent: new DynoFloat({ value: 1.0 }),
       recolor: new DynoVec4({
         value: new THREE.Vector4().setScalar(Number.NEGATIVE_INFINITY),
       }),
@@ -599,32 +601,32 @@ export class SplatMesh extends SplatGenerator {
       pixelScale *= this.lodScale;
     }
 
-    if (this.context.pixelScale.value !== pixelScale) {
-      this.context.pixelScale.value = pixelScale;
+    if (context.pixelScale.value !== pixelScale) {
+      context.pixelScale.value = pixelScale;
       if (this.enableLod) {
         updated = true;
       }
     }
 
     let numSplats = this.packedSplats.numSplats;
-    if (this.enableLod && this.lodMeta) {
+    const lodMeta = this.packedSplats.extra.lodMeta as LodMeta | undefined;
+    context.lodExponent.value = this.lodExponent;
+    if (this.enableLod && lodMeta) {
       const distance = context.viewToObject.translate.value.distanceTo(
-        this.lodMeta.boundCenter,
+        lodMeta.boundCenter,
       );
-      const closest = Math.max(0, distance - this.lodMeta.boundRadius);
-      const pixelSize = closest * pixelScale;
-      const cut = searchPixelSizes(this.lodMeta.pixelSizes, pixelSize);
+      const closest = Math.max(0, distance - lodMeta.boundRadius);
+      const pixelSize = closest ** this.lodExponent * pixelScale;
+      const cut = searchPixelSizes(lodMeta.pixelSizes, pixelSize);
 
       const cutSplats =
-        cut < this.lodMeta.pixelSizes.length
-          ? this.lodMeta.pixelSizes[cut][1]
+        cut < lodMeta.pixelSizes.length
+          ? lodMeta.pixelSizes[cut][1]
           : Number.POSITIVE_INFINITY;
       numSplats = Math.min(numSplats, cutSplats);
 
       let minPixelSize =
-        cut < this.lodMeta.pixelSizes.length
-          ? this.lodMeta.pixelSizes[cut][0]
-          : 0.0;
+        cut < lodMeta.pixelSizes.length ? lodMeta.pixelSizes[cut][0] : 0.0;
       (newState as { minPixelSize: number }).minPixelSize = minPixelSize;
       const sortPixelSize = (sortState as { minPixelSize?: number } | undefined)
         ?.minPixelSize;
@@ -648,16 +650,17 @@ export class SplatMesh extends SplatGenerator {
       }
       for (const chunk of this.chunks) {
         let chunkSplats = chunk.packedSplats.numSplats;
-        if (this.enableLod && chunk.lodMeta) {
+        const lodMeta = chunk.packedSplats.extra.lodMeta as LodMeta | undefined;
+        if (this.enableLod && lodMeta) {
           const distance = context.viewToObject.translate.value.distanceTo(
-            chunk.lodMeta.boundCenter,
+            lodMeta.boundCenter,
           );
-          const closest = Math.max(0, distance - chunk.lodMeta.boundRadius);
-          const pixelSize = closest * pixelScale;
-          const cut = searchPixelSizes(chunk.lodMeta.pixelSizes, pixelSize);
+          const closest = Math.max(0, distance - lodMeta.boundRadius);
+          const pixelSize = closest ** this.lodExponent * pixelScale;
+          const cut = searchPixelSizes(lodMeta.pixelSizes, pixelSize);
           const cutSplats =
-            cut < chunk.lodMeta.pixelSizes.length
-              ? chunk.lodMeta.pixelSizes[cut][1]
+            cut < lodMeta.pixelSizes.length
+              ? lodMeta.pixelSizes[cut][1]
               : Number.POSITIVE_INFINITY;
           chunkSplats = Math.min(chunkSplats, cutSplats);
         }
@@ -684,18 +687,18 @@ export class SplatMesh extends SplatGenerator {
     const chunk = multi as SplatChunk;
     this.updateSplatContext(chunk);
 
-    if (this.enableLod && chunk.lodMeta) {
+    const lodMeta = chunk.packedSplats.extra.lodMeta as LodMeta | undefined;
+    if (this.enableLod && lodMeta) {
       const distance = this.context.viewToObject.translate.value.distanceTo(
-        chunk.lodMeta.boundCenter,
+        lodMeta.boundCenter,
       );
-      const closest = Math.max(0, distance - chunk.lodMeta.boundRadius);
-      const pixelSize = closest * this.context.pixelScale.value;
-      const cut = searchPixelSizes(chunk.lodMeta.pixelSizes, pixelSize);
+      const closest = Math.max(0, distance - lodMeta.boundRadius);
+      const pixelSize =
+        closest ** this.lodExponent * this.context.pixelScale.value;
+      const cut = searchPixelSizes(lodMeta.pixelSizes, pixelSize);
 
       let minPixelSize =
-        cut < chunk.lodMeta.pixelSizes.length
-          ? chunk.lodMeta.pixelSizes[cut][0]
-          : 0.0;
+        cut < lodMeta.pixelSizes.length ? lodMeta.pixelSizes[cut][0] : 0.0;
       (newState as { minPixelSize: number }).minPixelSize = minPixelSize;
       const sortPixelSize = (sortState as { minPixelSize?: number } | undefined)
         ?.minPixelSize;
@@ -1149,7 +1152,7 @@ function maybeApplyLod(
   gsplat: DynoVal<typeof Gsplat>,
   viewDelta: DynoVal<"vec3">,
 ) {
-  const { enableLod, pixelScale, minPixelSize } = context;
+  const { enableLod, pixelScale, minPixelSize, lodExponent } = context;
   return dyno({
     inTypes: {
       gsplat: Gsplat,
@@ -1157,15 +1160,24 @@ function maybeApplyLod(
       enableLod: "bool",
       pixelScale: "float",
       minPixelSize: "float",
+      lodExponent: "float",
     },
     outTypes: { gsplat: Gsplat },
-    inputs: { gsplat, viewDelta, enableLod, pixelScale, minPixelSize },
+    inputs: {
+      gsplat,
+      viewDelta,
+      enableLod,
+      pixelScale,
+      minPixelSize,
+      lodExponent,
+    },
     globals: () => [defineGsplat, defineModulateLod],
     statements: ({ inputs, outputs }) =>
       unindentLines(`
         ${outputs.gsplat} = ${inputs.gsplat};
         if (${inputs.enableLod} && isGsplatActive(${outputs.gsplat}.flags)) {
           float distance = length(${inputs.viewDelta});
+          distance = pow(distance, ${inputs.lodExponent});
           float pixelSize = max(${inputs.minPixelSize}, distance * ${inputs.pixelScale});
           ${outputs.gsplat}.rgba.a *= modulateLod(pixelSize, ${outputs.gsplat}.lods);
         }

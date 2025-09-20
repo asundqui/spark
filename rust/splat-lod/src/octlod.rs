@@ -6,7 +6,7 @@ use ahash::{AHashMap, AHashSet};
 use ordered_float::OrderedFloat;
 use smallvec::SmallVec;
 
-use crate::{lod::{self, Gsplat, SymMat3}, LodMeta};
+use crate::{lod::{Gsplat, SymMat3}, LodMeta};
 
 const MIN_FACTOR: f32 = 2.0;
 const DISAPPEAR_FACTOR: f32 = 2.0;

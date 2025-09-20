@@ -13,6 +13,7 @@ export {
 } from "./SplatLoader";
 export { PlyReader } from "./ply";
 export { SpzReader, SpzWriter, transcodeSpz } from "./spz";
+export { RadReader } from "./rad";
 
 export {
   PackedSplats,
